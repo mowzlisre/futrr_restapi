@@ -14,3 +14,4 @@ urllib3==2.6.3
 gunicorn
 psycopg2-binary
 whitenoise
+python-dotenv
