@@ -1,13 +1,35 @@
 version: "3.3"
 
 services:
+
+  db:
+    image: postgres:16
+    container_name: futrr_postgres
+    restart: always
+    environment:
+      POSTGRES_DB: futrrdb
+      POSTGRES_USER: futrruser
+      POSTGRES_PASSWORD: futrrpassword
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
   futrr_api:
     build: .
     container_name: futrr_api
+    command: gunicorn futrr_restapi.wsgi:application --bind 0.0.0.0:8000 --workers 4
     ports:
       - "8001:8000"
     env_file:
       - .env
-    volumes:
-      - ./db.sqlite3:/app/db.sqlite3
+    environment:
+      DB_NAME: futrrdb
+      DB_USER: futrruser
+      DB_PASSWORD: futrrpassword
+      DB_HOST: db
+      DB_PORT: 5432
+    depends_on:
+      - db
     restart: always
+
+volumes:
+  postgres_data:
