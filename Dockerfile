@@ -16,4 +16,6 @@ RUN pip install -r requirements.txt
 
 COPY . .
 
+RUN python manage.py collectstatic --noinput
+
 CMD ["gunicorn", "futrr_restapi.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "4"]
