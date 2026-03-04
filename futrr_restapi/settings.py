@@ -27,7 +27,11 @@ DEBUG = True
 
 ALLOWED_HOSTS = ['api.futrr.app', 'localhost', '127.0.0.1']
 
-
+CSRF_TRUSTED_ORIGINS = [
+    "https://api.futrr.app",
+    "https://api.futrr.app",
+    "http://localhost:3000",
+]
 # Application definition
 
 INSTALLED_APPS = [
