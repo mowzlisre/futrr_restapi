@@ -31,18 +31,38 @@ def generate_presigned_url(s3_key: str, expiry_seconds: int = 900) -> str:
     )
 
 
-def upload_encrypted_media(s3_key: str, encrypted_bytes: bytes, content_type: str) -> None:
+def upload_file(s3_key: str, file_obj, content_type: str) -> None:
     """
-    Upload encrypted ciphertext to S3.
+    Stream-upload a plain (non-encrypted) file to S3.
+    Use this for user-facing assets such as avatars.
+    """
+    client = _get_client()
+    client.upload_fileobj(
+        file_obj,
+        settings.AWS_S3_BUCKET,
+        s3_key,
+        ExtraArgs={"ContentType": content_type},
+    )
+
+
+def upload_encrypted_media(s3_key: str, file_obj, content_type: str) -> None:
+    """
+    Stream-upload encrypted ciphertext to S3.
+
+    file_obj can be any file-like object (e.g. Django's InMemoryUploadedFile or
+    TemporaryUploadedFile).  Uses upload_fileobj so the file is streamed in
+    chunks rather than read entirely into memory first.
 
     content_type is metadata only — the actual bytes stored are ciphertext,
     not a readable media file.
     """
     client = _get_client()
-    client.put_object(
-        Bucket=settings.AWS_S3_BUCKET,
-        Key=s3_key,
-        Body=encrypted_bytes,
-        ContentType=content_type,
-        ServerSideEncryption="AES256",
+    client.upload_fileobj(
+        file_obj,
+        settings.AWS_S3_BUCKET,
+        s3_key,
+        ExtraArgs={
+            "ContentType": content_type,
+            "ServerSideEncryption": "AES256",
+        },
     )

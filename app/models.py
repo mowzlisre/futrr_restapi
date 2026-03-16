@@ -13,8 +13,8 @@ class Event(models.Model):
     )
     unlock_at = models.DateTimeField()
     invite_token = models.UUIDField(default=uuid.uuid4, unique=True)
-    is_public = models.BooleanField(default=False)
-    created_at = models.DateTimeField(auto_now_add=True)
+    is_public = models.BooleanField(default=False, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     def __str__(self):
         return self.title
@@ -32,7 +32,7 @@ class Capsule(models.Model):
     title = models.CharField(max_length=120, blank=True)
     description = models.TextField(blank=True)
     status = models.CharField(
-        max_length=20, choices=Status.choices, default=Status.SEALED
+        max_length=20, choices=Status.choices, default=Status.SEALED, db_index=True
     )
 
     created_by = models.ForeignKey(
@@ -49,7 +49,7 @@ class Capsule(models.Model):
         blank=True,
     )
 
-    is_public = models.BooleanField(default=False)
+    is_public = models.BooleanField(default=False, db_index=True)
     share_token = models.UUIDField(default=uuid.uuid4, unique=True)
 
     event = models.ForeignKey(
@@ -70,7 +70,10 @@ class Capsule(models.Model):
     location_name = models.CharField(max_length=200, blank=True)
     unlock_radius_meters = models.PositiveIntegerField(default=100)
 
-    created_at = models.DateTimeField(auto_now_add=True)
+    # Optional hint shown to the recipient at unlock time (not the passphrase itself)
+    passphrase_hint = models.CharField(max_length=200, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
@@ -80,7 +83,7 @@ class Capsule(models.Model):
     def capsule_type(self):
         if self.is_public:
             return "public"
-        elif self.recipients.exists():
+        elif self.capsule_recipients.exists():
             return "private"
         else:
             return "self"
@@ -209,6 +212,7 @@ class Notification(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+        indexes = [models.Index(fields=["user", "is_read"])]
 
     def __str__(self):
         return f"{self.notif_type} → {self.user_id}"

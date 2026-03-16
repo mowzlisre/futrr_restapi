@@ -4,6 +4,7 @@ from .api import (
     PasswordResetView, TwoFactorView, ChangePasswordView,
     UserProfileView, DeleteAccountView,
     UserSearchView, PublicUserProfileView, FollowView,
+    AvatarUploadView,
 )
 
 urlpatterns = [
@@ -30,6 +31,7 @@ urlpatterns = [
     # User profile
     path('me/', UserProfileView.get_me, name='user-me-get'),
     path('me/update/', UserProfileView.update_me, name='user-me-update'),
+    path('me/avatar/', AvatarUploadView.upload, name='avatar-upload'),
     path('me/followers/', FollowView.followers, name='my-followers'),
     path('me/following/', FollowView.following, name='my-following'),
 

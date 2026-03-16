@@ -12,6 +12,7 @@ from django.db.models import Q
 from django.utils import timezone
 import secrets
 import pyotp
+from app.s3 import upload_file, generate_presigned_url as s3_presign
 
 
 class SignUpView:
@@ -802,7 +803,7 @@ class UserProfileView:
                 "email": user.email,
                 "username": user.username,
                 "phone": user.phone,
-                "avatar": user.avatar,
+                "avatar": _presign_avatar(user.avatar),
                 "bio": user.bio,
                 "timezone": user.timezone,
                 "notification_email": user.notification_email,
@@ -862,19 +863,27 @@ class DeleteAccountView:
         return Response({"message": "Account deleted"}, status=status.HTTP_200_OK)
 
 
-def _serialize_user(user, request_user=None):
-    is_following = (
-        Follow.objects.filter(follower=request_user, following=user).exists()
-        if request_user and request_user.id != user.id
-        else False
-    )
+def _serialize_user(user, request_user=None, following_ids=None):
+    if following_ids is not None:
+        is_following = user.id in following_ids
+    elif request_user and request_user.id != user.id:
+        is_following = Follow.objects.filter(follower=request_user, following=user).exists()
+    else:
+        is_following = False
+
+    # Use pre-annotated counts when available (avoids N+1 in list views)
+    fc_ann = getattr(user, "followers_count_ann", None)
+    followers_count = fc_ann if fc_ann is not None else user.followers.count()
+    fg_ann = getattr(user, "following_count_ann", None)
+    following_count = fg_ann if fg_ann is not None else user.following.count()
+
     return {
         "id": str(user.id),
         "username": user.username,
-        "avatar": user.avatar,
+        "avatar": _presign_avatar(user.avatar),
         "bio": user.bio,
-        "followers_count": user.followers.count(),
-        "following_count": user.following.count(),
+        "followers_count": followers_count,
+        "following_count": following_count,
         "capsules_sealed": user.capsules_sealed,
         "is_following": is_following,
     }
@@ -890,14 +899,24 @@ class UserSearchView:
     @api_view(["GET"])
     @permission_classes([IsAuthenticated])
     def search(request):
+        from django.db.models import Count
         q = request.query_params.get("q", "").strip()
         if not q:
             return Response([])
-        users = (
+        users = list(
             FutrrUser.objects.filter(username__icontains=q)
-            .exclude(id=request.user.id)[:20]
+            .exclude(id=request.user.id)
+            .annotate(
+                followers_count_ann=Count("followers", distinct=True),
+                following_count_ann=Count("following", distinct=True),
+            )[:20]
         )
-        return Response([_serialize_user(u, request.user) for u in users])
+        following_ids = set(
+            Follow.objects.filter(
+                follower=request.user, following_id__in=[u.id for u in users]
+            ).values_list("following_id", flat=True)
+        )
+        return Response([_serialize_user(u, request.user, following_ids=following_ids) for u in users])
 
 
 class PublicUserProfileView:
@@ -973,12 +992,85 @@ class FollowView:
     @api_view(["GET"])
     @permission_classes([IsAuthenticated])
     def followers(request):
-        follows = Follow.objects.filter(following=request.user).select_related("follower")
-        return Response([_serialize_user(f.follower, request.user) for f in follows])
+        from django.db.models import Count
+        follower_ids = list(
+            Follow.objects.filter(following=request.user).values_list("follower_id", flat=True)
+        )
+        users = list(
+            FutrrUser.objects.filter(id__in=follower_ids)
+            .annotate(
+                followers_count_ann=Count("followers", distinct=True),
+                following_count_ann=Count("following", distinct=True),
+            )
+        )
+        # Which of these followers does request.user also follow back?
+        following_ids = set(
+            Follow.objects.filter(
+                follower=request.user, following_id__in=follower_ids
+            ).values_list("following_id", flat=True)
+        )
+        return Response([_serialize_user(u, request.user, following_ids=following_ids) for u in users])
 
     @staticmethod
     @api_view(["GET"])
     @permission_classes([IsAuthenticated])
     def following(request):
-        follows = Follow.objects.filter(follower=request.user).select_related("following")
-        return Response([_serialize_user(f.following, request.user) for f in follows])
+        from django.db.models import Count
+        following_id_list = list(
+            Follow.objects.filter(follower=request.user).values_list("following_id", flat=True)
+        )
+        users = list(
+            FutrrUser.objects.filter(id__in=following_id_list)
+            .annotate(
+                followers_count_ann=Count("followers", distinct=True),
+                following_count_ann=Count("following", distinct=True),
+            )
+        )
+        # All these users are followed by request.user
+        following_ids = set(following_id_list)
+        return Response([_serialize_user(u, request.user, following_ids=following_ids) for u in users])
+
+
+# ---------------------------------------------------------------------------
+# Avatar helpers
+# ---------------------------------------------------------------------------
+
+def _presign_avatar(avatar_value: str | None) -> str | None:
+    """
+    If avatar_value is an S3 key (starts with 'user_avatars/'), return a
+    presigned URL.  Otherwise return as-is (OAuth URLs, None, etc.).
+    """
+    if avatar_value and avatar_value.startswith("user_avatars/"):
+        return s3_presign(avatar_value, expiry_seconds=3600)
+    return avatar_value
+
+
+class AvatarUploadView:
+    """POST /users/me/avatar/ — upload a new profile avatar image"""
+
+    @staticmethod
+    @api_view(["POST"])
+    @permission_classes([IsAuthenticated])
+    def upload(request):
+        file = request.FILES.get("avatar")
+        if not file:
+            return Response({"error": "No file provided"}, status=status.HTTP_400_BAD_REQUEST)
+
+        allowed_types = {"image/jpeg", "image/png", "image/webp"}
+        content_type = file.content_type or "image/jpeg"
+        if content_type not in allowed_types:
+            return Response(
+                {"error": "Only JPEG, PNG, and WebP images are supported"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        ext = content_type.split("/")[-1].replace("jpeg", "jpg")
+        s3_key = f"user_avatars/{request.user.id}/avatar.{ext}"
+
+        upload_file(s3_key, file, content_type)
+
+        request.user.avatar = s3_key
+        request.user.save(update_fields=["avatar"])
+
+        presigned_url = _presign_avatar(s3_key)
+        return Response({"avatar": presigned_url}, status=status.HTTP_200_OK)
