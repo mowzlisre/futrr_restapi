@@ -25,7 +25,7 @@ SECRET_KEY = 'django-insecure-__-ilb=(+ry33#r9#*!bbz*4$)no*)r03k(@7b_dmq%#u72ud$
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['api.futrr.app', 'localhost', '127.0.0.1']
+ALLOWED_HOSTS = ['api.futrr.app', 'localhost', '127.0.0.1', '192.168.1.184']
 
 CSRF_TRUSTED_ORIGINS = [
     "https://api.futrr.app",
@@ -169,3 +169,7 @@ USE_TZ = True
 STATIC_URL = "/static/"
 STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
 STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
+
+# AWS
+AWS_REGION    = os.getenv("AWS_REGION", "us-east-1")
+AWS_S3_BUCKET = os.getenv("AWS_S3_BUCKET", "futrr-capsule-media")

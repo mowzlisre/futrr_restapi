@@ -7,7 +7,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from django.contrib.auth import authenticate
 from django.db import IntegrityError
 import requests
-from .models import FutrrUser, PasswordResetToken, TwoFactorDevice
+from .models import FutrrUser, Follow, PasswordResetToken, TwoFactorDevice
 from django.db.models import Q
 from django.utils import timezone
 import secrets
@@ -107,7 +107,7 @@ class LoginView:
     @permission_classes([AllowAny])
     def login(request):
 
-        identifier = request.data.get('identifier')  # email OR username
+        identifier = request.data.get('identifier') 
         password = request.data.get('password')
 
         if not identifier or not password:
@@ -116,9 +116,8 @@ class LoginView:
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Fetch user by email OR username in single query
         user = FutrrUser.objects.filter(
-            Q(email__iexact=identifier) | Q(username__iexact=identifier)
+            Q(email__iexact=identifier) | Q(username__iexact=identifier) | Q(phone__iexact=identifier)
         ).first()
 
         if not user:
@@ -787,3 +786,199 @@ class ChangePasswordView:
                 {"error": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+class UserProfileView:
+    """GET /users/me/ and PATCH /users/me/"""
+
+    @staticmethod
+    @api_view(["GET"])
+    @permission_classes([IsAuthenticated])
+    def get_me(request):
+        user = request.user
+        return Response(
+            {
+                "id": str(user.id),
+                "email": user.email,
+                "username": user.username,
+                "phone": user.phone,
+                "avatar": user.avatar,
+                "bio": user.bio,
+                "timezone": user.timezone,
+                "notification_email": user.notification_email,
+                "notification_push": user.notification_push,
+                "is_email_verified": user.is_email_verified,
+                "is_phone_verified": user.is_phone_verified,
+                "two_factor_enabled": user.two_factor_enabled,
+                "capsules_sealed": user.capsules_sealed,
+                "capsules_unlocked": user.capsules_unlocked,
+                "followers_count": user.followers.count(),
+                "following_count": user.following.count(),
+                "created_at": user.created_at,
+            }
+        )
+
+    @staticmethod
+    @api_view(["PATCH"])
+    @permission_classes([IsAuthenticated])
+    def update_me(request):
+        user = request.user
+        allowed_fields = ["username", "bio", "timezone", "notification_email", "notification_push", "avatar"]
+        for field in allowed_fields:
+            if field in request.data:
+                setattr(user, field, request.data[field])
+        try:
+            user.save()
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"message": "Profile updated"})
+
+
+class DeleteAccountView:
+    """DELETE /auth/delete-account/"""
+
+    @staticmethod
+    @api_view(["DELETE"])
+    @permission_classes([IsAuthenticated])
+    def delete_account(request):
+        """
+        Permanently delete the authenticated user's account.
+        - All capsules they created → BROKEN (via pre_delete signal)
+        - Their recipient rows → removed (via pre_delete signal)
+        Requires password confirmation.
+        """
+        password = request.data.get("password")
+        if not password:
+            return Response(
+                {"error": "Password confirmation is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not request.user.check_password(password):
+            return Response(
+                {"error": "Incorrect password"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        request.user.delete()
+        return Response({"message": "Account deleted"}, status=status.HTTP_200_OK)
+
+
+def _serialize_user(user, request_user=None):
+    is_following = (
+        Follow.objects.filter(follower=request_user, following=user).exists()
+        if request_user and request_user.id != user.id
+        else False
+    )
+    return {
+        "id": str(user.id),
+        "username": user.username,
+        "avatar": user.avatar,
+        "bio": user.bio,
+        "followers_count": user.followers.count(),
+        "following_count": user.following.count(),
+        "capsules_sealed": user.capsules_sealed,
+        "is_following": is_following,
+    }
+
+
+class UserSearchView:
+    """
+    GET /users/search/?q=<query>
+    Search users by username. Returns top 20 matches, excluding the requesting user.
+    """
+
+    @staticmethod
+    @api_view(["GET"])
+    @permission_classes([IsAuthenticated])
+    def search(request):
+        q = request.query_params.get("q", "").strip()
+        if not q:
+            return Response([])
+        users = (
+            FutrrUser.objects.filter(username__icontains=q)
+            .exclude(id=request.user.id)[:20]
+        )
+        return Response([_serialize_user(u, request.user) for u in users])
+
+
+class PublicUserProfileView:
+    """
+    GET /users/:id/  — public profile of any user
+    """
+
+    @staticmethod
+    @api_view(["GET"])
+    @permission_classes([IsAuthenticated])
+    def get_user(request, user_id):
+        from app.models import Capsule
+        try:
+            user = FutrrUser.objects.get(id=user_id)
+        except FutrrUser.DoesNotExist:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        data = _serialize_user(user, request.user)
+        # Attach public capsules for the profile view
+        public_capsules = Capsule.objects.filter(
+            created_by=user, is_public=True
+        ).order_by("-created_at")[:12]
+        data["public_capsules"] = [
+            {
+                "id": str(c.id),
+                "title": c.title,
+                "status": c.status,
+                "unlock_at": c.unlock_at.isoformat() if c.unlock_at else None,
+            }
+            for c in public_capsules
+        ]
+        return Response(data)
+
+
+class FollowView:
+    """
+    POST   /users/:id/follow/   — follow a user
+    DELETE /users/:id/follow/   — unfollow a user
+    GET    /users/me/followers/  — list my followers
+    GET    /users/me/following/  — list users I follow
+    """
+
+    @staticmethod
+    @api_view(["POST"])
+    @permission_classes([IsAuthenticated])
+    def follow(request, user_id):
+        if str(request.user.id) == str(user_id):
+            return Response({"error": "Cannot follow yourself"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            target = FutrrUser.objects.get(id=user_id)
+        except FutrrUser.DoesNotExist:
+            return Response({"error": "User not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        _, created = Follow.objects.get_or_create(follower=request.user, following=target)
+        if created:
+            # Create in-app notification for the followed user
+            from app.models import Notification
+            Notification.objects.create(
+                user=target,
+                notif_type="recipient_added",
+                title=f"@{request.user.username} started following you",
+                body="",
+            )
+        return Response({"following": True}, status=status.HTTP_200_OK)
+
+    @staticmethod
+    @api_view(["DELETE"])
+    @permission_classes([IsAuthenticated])
+    def unfollow(request, user_id):
+        Follow.objects.filter(follower=request.user, following_id=user_id).delete()
+        return Response({"following": False}, status=status.HTTP_200_OK)
+
+    @staticmethod
+    @api_view(["GET"])
+    @permission_classes([IsAuthenticated])
+    def followers(request):
+        follows = Follow.objects.filter(following=request.user).select_related("follower")
+        return Response([_serialize_user(f.follower, request.user) for f in follows])
+
+    @staticmethod
+    @api_view(["GET"])
+    @permission_classes([IsAuthenticated])
+    def following(request):
+        follows = Follow.objects.filter(follower=request.user).select_related("following")
+        return Response([_serialize_user(f.following, request.user) for f in follows])

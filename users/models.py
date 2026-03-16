@@ -45,8 +45,6 @@ class FutrrUser(AbstractUser):
     timezone = models.CharField(max_length=50, default="UTC")
     notification_email = models.BooleanField(default=True)
     notification_push = models.BooleanField(default=True)
-    capsules_sealed = models.PositiveIntegerField(default=0)
-    capsules_unlocked = models.PositiveIntegerField(default=0)
     is_email_verified = models.BooleanField(default=False)
     is_phone_verified = models.BooleanField(default=False)
     two_factor_enabled = models.BooleanField(default=False)
@@ -60,6 +58,14 @@ class FutrrUser(AbstractUser):
 
     def __str__(self):
         return self.username
+
+    @property
+    def capsules_sealed(self):
+        return self.capsules_created.filter(status="sealed").count()
+
+    @property
+    def capsules_unlocked(self):
+        return self.capsules_created.filter(status="unlocked").count()
 
 
 class PasswordResetToken(models.Model):
@@ -82,6 +88,23 @@ class PasswordResetToken(models.Model):
         if not self.pk:
             self.expires_at = timezone.now() + timedelta(hours=1)
         super().save(*args, **kwargs)
+
+
+class Follow(models.Model):
+    """follower → following relationship (Twitter-style, no mutual approval)."""
+    follower = models.ForeignKey(
+        FutrrUser, on_delete=models.CASCADE, related_name="following"
+    )
+    following = models.ForeignKey(
+        FutrrUser, on_delete=models.CASCADE, related_name="followers"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = [["follower", "following"]]
+
+    def __str__(self):
+        return f"{self.follower} → {self.following}"
 
 
 class TwoFactorDevice(models.Model):
