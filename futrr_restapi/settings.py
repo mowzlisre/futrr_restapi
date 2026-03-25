@@ -25,12 +25,13 @@ SECRET_KEY = 'django-insecure-__-ilb=(+ry33#r9#*!bbz*4$)no*)r03k(@7b_dmq%#u72ud$
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['api.futrr.app', 'localhost', '127.0.0.1', '192.168.1.184']
+ALLOWED_HOSTS = ['api.futrr.app', 'localhost', '10.0.0.104']
 
 CSRF_TRUSTED_ORIGINS = [
     "https://api.futrr.app",
     "https://api.futrr.app",
     "http://localhost:3000",
+
 ]
 # Application definition
 

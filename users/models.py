@@ -39,12 +39,15 @@ class FutrrUser(AbstractUser):
     phone = models.CharField(max_length=20, unique=True, null=True, blank=True)
 
     isPreboarded = models.BooleanField(default=False)
+    date_of_birth = models.DateField(null=True, blank=True)
+    country = models.CharField(max_length=100, blank=True)
 
     avatar = models.TextField(blank=True, null=True)
     bio = models.TextField(max_length=300, blank=True)
     timezone = models.CharField(max_length=50, default="UTC")
     notification_email = models.BooleanField(default=True)
     notification_push = models.BooleanField(default=True)
+    is_private = models.BooleanField(default=False)
     is_email_verified = models.BooleanField(default=False)
     is_phone_verified = models.BooleanField(default=False)
     two_factor_enabled = models.BooleanField(default=False)
@@ -107,6 +110,33 @@ class Follow(models.Model):
         return f"{self.follower} → {self.following}"
 
 
+class FollowRequest(models.Model):
+    """Pending follow request when target account is private."""
+    STATUS_PENDING = "pending"
+    STATUS_ACCEPTED = "accepted"
+    STATUS_REJECTED = "rejected"
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending"),
+        (STATUS_ACCEPTED, "Accepted"),
+        (STATUS_REJECTED, "Rejected"),
+    ]
+
+    from_user = models.ForeignKey(
+        FutrrUser, on_delete=models.CASCADE, related_name="sent_follow_requests"
+    )
+    to_user = models.ForeignKey(
+        FutrrUser, on_delete=models.CASCADE, related_name="received_follow_requests"
+    )
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = [["from_user", "to_user"]]
+
+    def __str__(self):
+        return f"{self.from_user} → {self.to_user} ({self.status})"
+
+
 class TwoFactorDevice(models.Model):
     """2FA devices for users"""
     DEVICE_TYPES = [
@@ -130,3 +160,24 @@ class TwoFactorDevice(models.Model):
 
     def __str__(self):
         return f"{self.user.email} - {self.device_type} ({self.device_name})"
+
+
+class EmailOTP(models.Model):
+    """Short-lived OTP for email verification during registration."""
+    email = models.EmailField(db_index=True)
+    otp = models.CharField(max_length=6)
+    session_token = models.CharField(max_length=64, unique=True, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    is_used = models.BooleanField(default=False)
+
+    def is_valid(self):
+        return not self.is_used and timezone.now() < self.expires_at
+
+    def save(self, *args, **kwargs):
+        if not self.pk:
+            self.expires_at = timezone.now() + timedelta(minutes=10)
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"OTP for {self.email}"

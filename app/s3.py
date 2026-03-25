@@ -45,6 +45,29 @@ def upload_file(s3_key: str, file_obj, content_type: str) -> None:
     )
 
 
+def delete_file(s3_key: str) -> None:
+    """Delete a single object from S3."""
+    client = _get_client()
+    client.delete_object(Bucket=settings.AWS_S3_BUCKET, Key=s3_key)
+
+
+def delete_files(s3_keys: list) -> None:
+    """
+    Bulk-delete up to 1000 S3 objects in one request.
+    Silently ignores keys that don't exist.
+    """
+    if not s3_keys:
+        return
+    client = _get_client()
+    client.delete_objects(
+        Bucket=settings.AWS_S3_BUCKET,
+        Delete={
+            "Objects": [{"Key": k} for k in s3_keys],
+            "Quiet": True,
+        },
+    )
+
+
 def upload_encrypted_media(s3_key: str, file_obj, content_type: str) -> None:
     """
     Stream-upload encrypted ciphertext to S3.

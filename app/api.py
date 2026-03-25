@@ -7,8 +7,8 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import Capsule, CapsuleContent, CapsuleEncryptionKey, CapsuleFavorite, CapsuleRecipient, Event, Notification
-from .s3 import generate_presigned_url, upload_encrypted_media
+from .models import Capsule, CapsuleContent, CapsuleEncryptionKey, CapsuleFavorite, CapsulePin, CapsuleRecipient, Event, Notification
+from .s3 import generate_presigned_url, upload_encrypted_media, upload_file
 from users.models import FutrrUser
 
 
@@ -37,7 +37,7 @@ def _presign_creator_avatar(avatar_value):
         return generate_presigned_url(avatar_value, expiry_seconds=3600)
     return avatar_value
 
-def _serialize_capsule(capsule, include_content=False, user=None, favorited_ids=None):
+def _serialize_capsule(capsule, include_content=False, user=None, favorited_ids=None, pinned_ids=None):
     # Determine encryption type from the linked key record (if any).
     # "self" means UMK (passphrase-protected); "auto" means SMK or no key.
     try:
@@ -58,6 +58,25 @@ def _serialize_capsule(capsule, include_content=False, user=None, favorited_ids=
     else:
         is_favorited = False
 
+    # is_pinned: use pre-fetched set when available, otherwise hit the DB once.
+    if pinned_ids is not None:
+        is_pinned = capsule.id in pinned_ids
+    elif user is not None:
+        is_pinned = CapsulePin.objects.filter(user=user, capsule=capsule).exists()
+    else:
+        is_pinned = False
+
+    # Aggregate counts
+    favorite_count = capsule.favorited_by.count()
+    pin_count = capsule.pinned_by.count()
+
+    # Lightweight content-type summary (distinct types present in the capsule)
+    content_types = list(
+        capsule.contents.order_by().values_list("content_type", flat=True).distinct()
+    ) if hasattr(capsule, '_prefetched_objects_cache') and 'contents' in capsule._prefetched_objects_cache else list(
+        capsule.contents.order_by().values_list("content_type", flat=True).distinct()
+    )
+
     data = {
         "id": str(capsule.id),
         "title": capsule.title,
@@ -67,6 +86,10 @@ def _serialize_capsule(capsule, include_content=False, user=None, favorited_ids=
         "encryption_type": encryption_type,
         "is_public": capsule.is_public,
         "is_favorited": is_favorited,
+        "is_pinned": is_pinned,
+        "listed_in_atlas": capsule.listed_in_atlas,
+        "favorite_count": favorite_count,
+        "pin_count": pin_count,
         "share_token": str(capsule.share_token),
         "event": str(capsule.event_id) if capsule.event_id else None,
         "sealed_at": capsule.sealed_at,
@@ -76,6 +99,7 @@ def _serialize_capsule(capsule, include_content=False, user=None, favorited_ids=
         "longitude": capsule.longitude,
         "location_name": capsule.location_name,
         "unlock_radius_meters": capsule.unlock_radius_meters,
+        "content_types": content_types,
         "created_at": capsule.created_at,
         "created_by": str(capsule.created_by_id) if capsule.created_by_id else None,
         "created_by_username": capsule.created_by.username if capsule.created_by else None,
@@ -103,17 +127,48 @@ def _serialize_content(content):
     return data
 
 
-def _serialize_event(event):
-    return {
+def _serialize_event(event, user=None):
+    capsules_qs = event.capsules.select_related("created_by")
+    participant_count = capsules_qs.count()
+
+    # Build participants list (first 5 for avatar stack)
+    participants = []
+    for c in capsules_qs[:5]:
+        if c.created_by:
+            participants.append({
+                "id": str(c.created_by.id),
+                "username": c.created_by.username,
+            })
+
+    data = {
         "id": str(event.id),
         "title": event.title,
+        "subtitle": event.subtitle,
         "description": event.description,
+        "slug": event.slug or None,
+        "banner_image": generate_presigned_url(event.banner_image, expiry_seconds=3600) if event.banner_image else None,
         "created_by": str(event.created_by_id) if event.created_by_id else None,
+        "created_by_username": event.created_by.username if event.created_by else None,
         "unlock_at": event.unlock_at,
         "invite_token": str(event.invite_token),
         "is_public": event.is_public,
+        "event_type": event.event_type,
+        "event_type_label": event.event_type_label,
+        "is_time_locked": event.is_time_locked,
+        "entry_start": event.entry_start,
+        "entry_close": event.entry_close,
+        "max_participants": event.max_participants,
+        "allowed_content_types": event.allowed_content_types,
+        "participant_count": participant_count,
+        "participants": participants,
         "created_at": event.created_at,
     }
+
+    # Check if requesting user already has a capsule in this event
+    if user:
+        data["user_has_capsule"] = capsules_qs.filter(created_by=user).exists()
+
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +200,27 @@ class CapsuleListCreateView(APIView):
 
     def post(self, request):
         unlock_at = request.data.get("unlock_at")
+
+        event_id = request.data.get("event_id")
+        event_obj = None
+        if event_id:
+            try:
+                event_obj = Event.objects.get(id=event_id)
+            except Event.DoesNotExist:
+                return Response({"error": "Event not found"}, status=status.HTTP_404_NOT_FOUND)
+            # Check if user already has a capsule in this event
+            if Capsule.objects.filter(event=event_obj, created_by=request.user).exists():
+                return Response(
+                    {"error": "You already have a capsule in this event"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            # Use event's unlock_at for time-locked events
+            if event_obj.is_time_locked and event_obj.unlock_at:
+                unlock_at = event_obj.unlock_at.isoformat()
+            elif not event_obj.is_time_locked:
+                # Open events don't need unlock_at - set a far future date
+                unlock_at = unlock_at or "2099-12-31T23:59:59Z"
+
         if not unlock_at:
             return Response(
                 {"error": "unlock_at is required"},
@@ -154,6 +230,7 @@ class CapsuleListCreateView(APIView):
             title=request.data.get("title", ""),
             description=request.data.get("description", ""),
             created_by=request.user,
+            event=event_obj,
             unlock_at=unlock_at,
             is_public=request.data.get("is_public", False),
             latitude=request.data.get("latitude"),
@@ -254,20 +331,24 @@ class CapsuleRecipientView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        recipient_user = None
+
         if user_id:
             try:
                 recipient_user = FutrrUser.objects.get(id=user_id)
             except FutrrUser.DoesNotExist:
                 return Response({"error": "User not found"}, status=status.HTTP_404_NOT_FOUND)
-            CapsuleRecipient.objects.get_or_create(
+            _, created = CapsuleRecipient.objects.get_or_create(
                 capsule=capsule,
                 user=recipient_user,
                 defaults={"added_via": CapsuleRecipient.AddedVia.INVITED},
             )
         else:
+            created = False
             try:
                 existing_user = FutrrUser.objects.get(email=email)
-                CapsuleRecipient.objects.get_or_create(
+                recipient_user = existing_user
+                _, created = CapsuleRecipient.objects.get_or_create(
                     capsule=capsule,
                     user=existing_user,
                     defaults={"added_via": CapsuleRecipient.AddedVia.INVITED},
@@ -279,7 +360,47 @@ class CapsuleRecipientView(APIView):
                     defaults={"user": None, "added_via": CapsuleRecipient.AddedVia.INVITED},
                 )
 
+        # Notify the recipient if they're a registered user and were newly added
+        if created and recipient_user:
+            capsule_title = capsule.title or "Untitled capsule"
+            sender_name = request.user.username
+            Notification.objects.create(
+                user=recipient_user,
+                notif_type=Notification.NotifType.RECIPIENT_ADDED,
+                title=f"You received an invitation for a capsule",
+                body=f"@{sender_name} invited you to \"{capsule_title}\"",
+                related_capsule=capsule,
+            )
+
         return Response({"message": "Recipient added"}, status=status.HTTP_201_CREATED)
+
+
+class CapsuleInvitationView(APIView):
+    """
+    POST   /api/capsules/:id/invitation/accept/  — accept; stays as recipient, marks notif read
+    DELETE /api/capsules/:id/invitation/decline/ — decline; removes self from recipients
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, capsule_id):
+        """Accept — just acknowledge; mark related notification(s) read."""
+        Notification.objects.filter(
+            user=request.user,
+            notif_type=Notification.NotifType.RECIPIENT_ADDED,
+            related_capsule_id=capsule_id,
+            is_read=False,
+        ).update(is_read=True)
+        return Response({"accepted": True}, status=status.HTTP_200_OK)
+
+    def delete(self, request, capsule_id):
+        """Decline — remove self as recipient and mark notification read."""
+        CapsuleRecipient.objects.filter(capsule_id=capsule_id, user=request.user).delete()
+        Notification.objects.filter(
+            user=request.user,
+            notif_type=Notification.NotifType.RECIPIENT_ADDED,
+            related_capsule_id=capsule_id,
+        ).update(is_read=True)
+        return Response({"declined": True}, status=status.HTTP_200_OK)
 
 
 class CapsuleJoinView(APIView):
@@ -410,41 +531,188 @@ class CapsuleUnlockView(APIView):
 
 class EventListCreateView(APIView):
     """
+    GET  /api/events/  — list public events (+ user's own)
     POST /api/events/  — create a new event
     """
     permission_classes = [IsAuthenticated]
 
+    def get(self, request):
+        from django.db.models import Q
+        qs = (
+            Event.objects.filter(Q(is_public=True) | Q(created_by=request.user))
+            .select_related("created_by")
+            .order_by("-created_at")
+        )
+        try:
+            page = max(1, int(request.query_params.get("page", 1)))
+            page_size = min(50, max(1, int(request.query_params.get("page_size", 20))))
+        except (ValueError, TypeError):
+            page, page_size = 1, 20
+
+        start = (page - 1) * page_size
+        end = start + page_size
+        total = qs.count()
+        events = list(qs[start:end])
+
+        return Response({
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "results": [_serialize_event(e) for e in events],
+        })
+
     def post(self, request):
         title = request.data.get("title", "").strip()
+        is_time_locked = request.data.get("is_time_locked", True)
         unlock_at = request.data.get("unlock_at")
 
         if not title:
             return Response({"error": "title is required"}, status=status.HTTP_400_BAD_REQUEST)
-        if not unlock_at:
-            return Response({"error": "unlock_at is required"}, status=status.HTTP_400_BAD_REQUEST)
+        if is_time_locked and not unlock_at:
+            return Response({"error": "unlock_at is required for time-locked events"}, status=status.HTTP_400_BAD_REQUEST)
+
+        allowed_types = request.data.get("allowed_content_types", ["text", "photo", "video", "voice"])
+        if not isinstance(allowed_types, list):
+            allowed_types = ["text", "photo", "video", "voice"]
+
+        # Validate slug uniqueness
+        import re
+        slug = request.data.get("slug", "").strip().lower()
+        if slug:
+            slug = re.sub(r"[^a-z0-9-]", "-", slug).strip("-")
+            slug = re.sub(r"-+", "-", slug)
+            if Event.objects.filter(slug=slug).exists():
+                return Response({"error": "This URL slug is already taken"}, status=status.HTTP_400_BAD_REQUEST)
 
         event = Event.objects.create(
             title=title,
+            subtitle=request.data.get("subtitle", ""),
             description=request.data.get("description", ""),
+            slug=slug or None,
             created_by=request.user,
-            unlock_at=unlock_at,
+            unlock_at=unlock_at if is_time_locked else None,
             is_public=request.data.get("is_public", False),
+            event_type=request.data.get("event_type", "other"),
+            event_type_label=request.data.get("event_type_label", ""),
+            is_time_locked=is_time_locked,
+            entry_start=request.data.get("entry_start") or None,
+            entry_close=request.data.get("entry_close") or None,
+            max_participants=request.data.get("max_participants") or None,
+            allowed_content_types=allowed_types,
         )
+
+        banner_file = request.FILES.get("banner_image")
+        if banner_file:
+            ext = banner_file.name.rsplit(".", 1)[-1] if "." in banner_file.name else "jpg"
+            s3_key = f"event_banners/{event.id}/banner.{ext}"
+            upload_file(s3_key, banner_file, banner_file.content_type or "image/jpeg")
+            event.banner_image = s3_key
+            event.save(update_fields=["banner_image"])
+
         return Response(_serialize_event(event), status=status.HTTP_201_CREATED)
 
 
 class EventDetailView(APIView):
     """
-    GET /api/events/:id/  — get event details
+    GET   /api/events/:id/  — get event details
+    PATCH /api/events/:id/  — update event (organizer only)
+    DELETE /api/events/:id/ — delete event (organizer only); capsules are preserved via SET_NULL
     """
     permission_classes = [IsAuthenticated]
 
-    def get(self, request, event_id):
+    def _get_event(self, event_id):
         try:
-            event = Event.objects.get(id=event_id)
+            return Event.objects.get(id=event_id)
         except Event.DoesNotExist:
+            return None
+
+    def get(self, request, event_id):
+        event = self._get_event(event_id)
+        if not event:
             return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        return Response(_serialize_event(event, user=request.user))
+
+    def patch(self, request, event_id):
+        event = self._get_event(event_id)
+        if not event:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        if event.created_by_id != request.user.id:
+            return Response({"error": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+
+        updatable = [
+            "title", "subtitle", "description", "event_type", "event_type_label",
+            "is_time_locked", "unlock_at", "entry_start", "entry_close",
+            "is_public", "max_participants", "allowed_content_types",
+        ]
+        for field in updatable:
+            if field in request.data:
+                setattr(event, field, request.data[field] if request.data[field] != "" else None)
+
+        # Handle slug update
+        if "slug" in request.data:
+            import re
+            slug = request.data["slug"].strip().lower() if request.data["slug"] else ""
+            if slug:
+                slug = re.sub(r"[^a-z0-9-]", "-", slug).strip("-")
+                slug = re.sub(r"-+", "-", slug)
+                if Event.objects.filter(slug=slug).exclude(id=event.id).exists():
+                    return Response({"error": "This URL slug is already taken"}, status=status.HTTP_400_BAD_REQUEST)
+                event.slug = slug
+            else:
+                event.slug = None
+
+        # allowed_content_types must be a list
+        if "allowed_content_types" in request.data:
+            val = request.data["allowed_content_types"]
+            event.allowed_content_types = val if isinstance(val, list) else ["text", "photo", "video", "voice"]
+
+        # Validate: time-locked events must have unlock_at
+        if event.is_time_locked and not event.unlock_at:
+            return Response(
+                {"error": "unlock_at is required for time-locked events"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        event.save()
+
+        banner_file = request.FILES.get("banner_image")
+        if banner_file:
+            ext = banner_file.name.rsplit(".", 1)[-1] if "." in banner_file.name else "jpg"
+            s3_key = f"event_banners/{event.id}/banner.{ext}"
+            upload_file(s3_key, banner_file, banner_file.content_type or "image/jpeg")
+            event.banner_image = s3_key
+            event.save(update_fields=["banner_image"])
+
         return Response(_serialize_event(event))
+
+    def delete(self, request, event_id):
+        event = self._get_event(event_id)
+        if not event:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        if event.created_by_id != request.user.id:
+            return Response({"error": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        # Capsule.event FK has on_delete=SET_NULL — deleting the event automatically
+        # nullifies capsule.event for all associated capsules without deleting them.
+        event.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class EventSlugCheckView(APIView):
+    """
+    GET /api/events/check-slug/?slug=<slug>
+    Returns { available: true/false }
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        import re
+        slug = request.query_params.get("slug", "").strip().lower()
+        if not slug:
+            return Response({"available": False, "error": "slug is required"})
+        slug = re.sub(r"[^a-z0-9-]", "-", slug).strip("-")
+        slug = re.sub(r"-+", "-", slug)
+        exists = Event.objects.filter(slug=slug).exists()
+        return Response({"available": not exists, "slug": slug})
 
 
 class EventJoinView(APIView):
@@ -683,6 +951,7 @@ class CapsuleMapView(APIView):
 
         capsules = list(Capsule.objects.filter(
             is_public=True,
+            listed_in_atlas=True,
             latitude__isnull=False,
             longitude__isnull=False,
             latitude__gte=lat_min,
@@ -925,6 +1194,7 @@ def _serialize_notification(notif):
         "body": notif.body,
         "is_read": notif.is_read,
         "related_capsule": str(notif.related_capsule_id) if notif.related_capsule_id else None,
+        "related_capsule_title": notif.related_capsule.title if notif.related_capsule_id and hasattr(notif, "related_capsule") and notif.related_capsule else None,
         "related_event": str(notif.related_event_id) if notif.related_event_id else None,
         "created_at": notif.created_at,
     }
@@ -954,7 +1224,7 @@ class NotificationListView(APIView):
         start = (page - 1) * page_size
         end = start + page_size
         total = qs.count()
-        notifications = list(qs[start:end])
+        notifications = list(qs.select_related("related_capsule")[start:end])
         return Response({
             "total": total,
             "page": page,
@@ -977,3 +1247,171 @@ class NotificationReadView(APIView):
         notif.is_read = True
         notif.save(update_fields=["is_read"])
         return Response({"message": "Marked as read"})
+
+
+# ---------------------------------------------------------------------------
+# Capsule Pin
+# ---------------------------------------------------------------------------
+
+class CapsulePinView(APIView):
+    """
+    POST /api/capsules/:id/pin/
+
+    Toggle pin on a public capsule for the requesting user's profile.
+    Only public capsules can be pinned. Returns the new state.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, capsule_id):
+        try:
+            capsule = Capsule.objects.get(id=capsule_id)
+        except Capsule.DoesNotExist:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        if not capsule.is_accessible:
+            return Response(
+                {"error": "This capsule is broken and inaccessible"},
+                status=status.HTTP_410_GONE,
+            )
+
+        if not capsule.is_public:
+            return Response(
+                {"error": "Only public capsules can be pinned"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        pin, created = CapsulePin.objects.get_or_create(
+            user=request.user, capsule=capsule
+        )
+        if not created:
+            pin.delete()
+            return Response({"pinned": False})
+
+        return Response({"pinned": True}, status=status.HTTP_201_CREATED)
+
+
+# ---------------------------------------------------------------------------
+# Capsule Visibility
+# ---------------------------------------------------------------------------
+
+class CapsuleVisibilityView(APIView):
+    """
+    PATCH /api/capsules/:id/visibility/
+
+    Update capsule visibility settings.  Owner only.
+    Body (all optional):
+      is_public: bool            — make public or private
+      listed_in_atlas: bool      — list/unlist from the Atlas map
+      latitude: float            — atlas pin location
+      longitude: float           — atlas pin location
+      location_name: string      — human-readable location label
+
+    When listed_in_atlas is set to True, the capsule is also made public.
+    When a public capsule is made private:
+      - All pins are deleted (auto-unpin from every profile)
+      - listed_in_atlas is reset to False
+    """
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, capsule_id):
+        try:
+            capsule = Capsule.objects.get(id=capsule_id)
+        except Capsule.DoesNotExist:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        if capsule.created_by != request.user:
+            return Response(
+                {"error": "Only the capsule owner can change visibility"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        new_public = request.data.get("is_public")
+        new_atlas = request.data.get("listed_in_atlas")
+        updated = []
+
+        # Show in Atlas implicitly makes the capsule public
+        if new_atlas and not capsule.is_public:
+            capsule.is_public = True
+            updated.append("is_public")
+
+        if new_public is not None:
+            capsule.is_public = new_public
+            updated.append("is_public") if "is_public" not in updated else None
+
+            # Public → Private: auto-unpin from all profiles, remove from atlas
+            if not new_public:
+                CapsulePin.objects.filter(capsule=capsule).delete()
+                capsule.listed_in_atlas = False
+                updated.append("listed_in_atlas")
+
+        if new_atlas is not None and capsule.is_public:
+            capsule.listed_in_atlas = new_atlas
+            if "listed_in_atlas" not in updated:
+                updated.append("listed_in_atlas")
+
+        # Update location when listing on atlas
+        lat = request.data.get("latitude")
+        lng = request.data.get("longitude")
+        loc_name = request.data.get("location_name")
+        if lat is not None and lng is not None:
+            capsule.latitude = lat
+            capsule.longitude = lng
+            updated.extend(f for f in ["latitude", "longitude"] if f not in updated)
+        if loc_name is not None:
+            capsule.location_name = loc_name
+            if "location_name" not in updated:
+                updated.append("location_name")
+
+        if updated:
+            capsule.save(update_fields=updated)
+
+        return Response({
+            "is_public": capsule.is_public,
+            "listed_in_atlas": capsule.listed_in_atlas,
+            "latitude": capsule.latitude,
+            "longitude": capsule.longitude,
+            "location_name": capsule.location_name,
+        })
+
+
+# ---------------------------------------------------------------------------
+# Pinned Capsules List
+# ---------------------------------------------------------------------------
+
+class PinnedCapsulesListView(APIView):
+    """
+    GET /api/capsules/pinned/           — list capsules pinned by the requesting user
+    GET /api/capsules/pinned/:user_id/  — list capsules pinned by a specific user
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, user_id=None):
+        target_user = request.user
+        if user_id:
+            try:
+                target_user = FutrrUser.objects.get(id=user_id)
+            except FutrrUser.DoesNotExist:
+                return Response({"error": "User not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        capsules = list(
+            Capsule.objects.filter(
+                pinned_by__user=target_user, is_public=True,
+            ).exclude(status=Capsule.Status.BROKEN)
+            .select_related("created_by", "encryption_key")
+            .prefetch_related("capsule_recipients", "contents")
+            .order_by("-pinned_by__created_at")
+        )
+        fav_ids = set(
+            CapsuleFavorite.objects.filter(
+                user=request.user, capsule_id__in=[c.id for c in capsules]
+            ).values_list("capsule_id", flat=True)
+        )
+        pin_ids = set(
+            CapsulePin.objects.filter(
+                user=request.user, capsule_id__in=[c.id for c in capsules]
+            ).values_list("capsule_id", flat=True)
+        )
+        return Response([
+            _serialize_capsule(c, user=request.user, favorited_ids=fav_ids, pinned_ids=pin_ids)
+            for c in capsules
+        ])

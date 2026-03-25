@@ -7,13 +7,43 @@ from users.models import FutrrUser
 class Event(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     title = models.CharField(max_length=120)
+    subtitle = models.CharField(max_length=200, blank=True)
     description = models.TextField(blank=True)
+    banner_image = models.CharField(max_length=500, blank=True)  # S3 key for event banner
     created_by = models.ForeignKey(
         FutrrUser, on_delete=models.SET_NULL, null=True, related_name="events_created"
     )
-    unlock_at = models.DateTimeField()
+    # unlock_at is only required for time-locked events
+    unlock_at = models.DateTimeField(null=True, blank=True)
+    slug = models.SlugField(max_length=120, unique=True, blank=True, null=True)
     invite_token = models.UUIDField(default=uuid.uuid4, unique=True)
+    EVENT_TYPE_CHOICES = [
+        ("birthday", "Birthday"),
+        ("wedding", "Wedding"),
+        ("graduation", "Graduation"),
+        ("anniversary", "Anniversary"),
+        ("new_year", "New Year"),
+        ("sports", "Sports"),
+        ("travel", "Travel"),
+        ("festival", "Festival"),
+        ("music", "Music"),
+        ("memorial", "Memorial"),
+        ("reunion", "Reunion"),
+        ("other", "Other"),
+    ]
     is_public = models.BooleanField(default=False, db_index=True)
+    event_type = models.CharField(max_length=30, choices=EVENT_TYPE_CHOICES, default="other")
+    # Editable display label for the event type (overrides the default label)
+    event_type_label = models.CharField(max_length=100, blank=True)
+    # Time-locked: capsules sealed until unlock_at; Open: capsules accessible anytime
+    is_time_locked = models.BooleanField(default=True)
+    # Window during which participants can submit capsules
+    entry_start = models.DateTimeField(null=True, blank=True)
+    entry_close = models.DateTimeField(null=True, blank=True)
+    # Max number of participants (null = unlimited)
+    max_participants = models.PositiveIntegerField(null=True, blank=True)
+    # Which content types participants are allowed to submit: ["text","photo","video","voice"]
+    allowed_content_types = models.JSONField(default=list)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     def __str__(self):
@@ -72,6 +102,9 @@ class Capsule(models.Model):
 
     # Optional hint shown to the recipient at unlock time (not the passphrase itself)
     passphrase_hint = models.CharField(max_length=200, blank=True)
+
+    # Whether the capsule is listed on the Atlas map (only relevant for public capsules)
+    listed_in_atlas = models.BooleanField(default=True)
 
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -183,6 +216,27 @@ class CapsuleFavorite(models.Model):
 
     def __str__(self):
         return f"{self.user_id} ♡ {self.capsule_id}"
+
+
+class CapsulePin(models.Model):
+    """
+    A user pins a public capsule to their own profile.
+    Only public capsules can be pinned.  When a capsule goes private,
+    all its pins are auto-deleted.
+    """
+    user = models.ForeignKey(
+        FutrrUser, on_delete=models.CASCADE, related_name="pinned_capsules"
+    )
+    capsule = models.ForeignKey(
+        Capsule, on_delete=models.CASCADE, related_name="pinned_by"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = [["user", "capsule"]]
+
+    def __str__(self):
+        return f"{self.user_id} 📌 {self.capsule_id}"
 
 
 class Notification(models.Model):

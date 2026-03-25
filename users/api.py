@@ -7,10 +7,11 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from django.contrib.auth import authenticate
 from django.db import IntegrityError
 import requests
-from .models import FutrrUser, Follow, PasswordResetToken, TwoFactorDevice
+from .models import FutrrUser, Follow, FollowRequest, PasswordResetToken, TwoFactorDevice, EmailOTP
 from django.db.models import Q
 from django.utils import timezone
 import secrets
+import random
 import pyotp
 from app.s3 import upload_file, generate_presigned_url as s3_presign
 
@@ -148,7 +149,8 @@ class LoginView:
                     "id": str(user.id),
                     "email": user.email,
                     "username": user.username,
-                    "is_email_verified": user.is_email_verified
+                    "is_email_verified": user.is_email_verified,
+                    "isPreboarded": user.isPreboarded,
                 },
                 "tokens": {
                     "refresh": str(refresh),
@@ -796,18 +798,24 @@ class UserProfileView:
     @api_view(["GET"])
     @permission_classes([IsAuthenticated])
     def get_me(request):
+        from app.models import CapsulePin
         user = request.user
         return Response(
             {
                 "id": str(user.id),
                 "email": user.email,
                 "username": user.username,
+                "first_name": user.first_name,
+                "isPreboarded": user.isPreboarded,
+                "date_of_birth": user.date_of_birth.isoformat() if user.date_of_birth else None,
+                "country": user.country,
                 "phone": user.phone,
                 "avatar": _presign_avatar(user.avatar),
                 "bio": user.bio,
                 "timezone": user.timezone,
                 "notification_email": user.notification_email,
                 "notification_push": user.notification_push,
+                "is_private": user.is_private,
                 "is_email_verified": user.is_email_verified,
                 "is_phone_verified": user.is_phone_verified,
                 "two_factor_enabled": user.two_factor_enabled,
@@ -815,6 +823,7 @@ class UserProfileView:
                 "capsules_unlocked": user.capsules_unlocked,
                 "followers_count": user.followers.count(),
                 "following_count": user.following.count(),
+                "pinned_count": CapsulePin.objects.filter(user=user).count(),
                 "created_at": user.created_at,
             }
         )
@@ -824,7 +833,7 @@ class UserProfileView:
     @permission_classes([IsAuthenticated])
     def update_me(request):
         user = request.user
-        allowed_fields = ["username", "bio", "timezone", "notification_email", "notification_push", "avatar"]
+        allowed_fields = ["username", "bio", "timezone", "notification_email", "notification_push", "is_private", "avatar"]
         for field in allowed_fields:
             if field in request.data:
                 setattr(user, field, request.data[field])
@@ -863,13 +872,22 @@ class DeleteAccountView:
         return Response({"message": "Account deleted"}, status=status.HTTP_200_OK)
 
 
-def _serialize_user(user, request_user=None, following_ids=None):
+def _serialize_user(user, request_user=None, following_ids=None, pending_ids=None):
     if following_ids is not None:
         is_following = user.id in following_ids
     elif request_user and request_user.id != user.id:
         is_following = Follow.objects.filter(follower=request_user, following=user).exists()
     else:
         is_following = False
+
+    if pending_ids is not None:
+        follow_request_pending = user.id in pending_ids
+    elif request_user and request_user.id != user.id and not is_following:
+        follow_request_pending = FollowRequest.objects.filter(
+            from_user=request_user, to_user=user, status=FollowRequest.STATUS_PENDING
+        ).exists()
+    else:
+        follow_request_pending = False
 
     # Use pre-annotated counts when available (avoids N+1 in list views)
     fc_ann = getattr(user, "followers_count_ann", None)
@@ -886,6 +904,8 @@ def _serialize_user(user, request_user=None, following_ids=None):
         "following_count": following_count,
         "capsules_sealed": user.capsules_sealed,
         "is_following": is_following,
+        "is_private": user.is_private,
+        "follow_request_pending": follow_request_pending,
     }
 
 
@@ -928,7 +948,7 @@ class PublicUserProfileView:
     @api_view(["GET"])
     @permission_classes([IsAuthenticated])
     def get_user(request, user_id):
-        from app.models import Capsule
+        from app.models import Capsule, CapsulePin
         try:
             user = FutrrUser.objects.get(id=user_id)
         except FutrrUser.DoesNotExist:
@@ -947,13 +967,28 @@ class PublicUserProfileView:
             }
             for c in public_capsules
         ]
+        # Attach pinned capsules for the profile view
+        pinned_capsules = Capsule.objects.filter(
+            pinned_by__user=user, is_public=True
+        ).select_related("created_by").order_by("-pinned_by__created_at")[:12]
+        data["pinned_capsules"] = [
+            {
+                "id": str(c.id),
+                "title": c.title,
+                "status": c.status,
+                "unlock_at": c.unlock_at.isoformat() if c.unlock_at else None,
+                "created_by_username": c.created_by.username if c.created_by else None,
+            }
+            for c in pinned_capsules
+        ]
+        data["pinned_count"] = CapsulePin.objects.filter(user=user).count()
         return Response(data)
 
 
 class FollowView:
     """
-    POST   /users/:id/follow/   — follow a user
-    DELETE /users/:id/follow/   — unfollow a user
+    POST   /users/:id/follow/   — follow a user (or send request if private)
+    DELETE /users/:id/follow/   — unfollow / cancel follow request
     GET    /users/me/followers/  — list my followers
     GET    /users/me/following/  — list users I follow
     """
@@ -969,9 +1004,28 @@ class FollowView:
         except FutrrUser.DoesNotExist:
             return Response({"error": "User not found"}, status=status.HTTP_404_NOT_FOUND)
 
+        # Already following?
+        if Follow.objects.filter(follower=request.user, following=target).exists():
+            return Response({"following": True}, status=status.HTTP_200_OK)
+
+        if target.is_private:
+            # Create or return existing follow request
+            _, created = FollowRequest.objects.get_or_create(
+                from_user=request.user, to_user=target,
+                defaults={"status": FollowRequest.STATUS_PENDING},
+            )
+            if created:
+                from app.models import Notification
+                Notification.objects.create(
+                    user=target,
+                    notif_type="recipient_added",
+                    title=f"@{request.user.username} requested to follow you",
+                    body="",
+                )
+            return Response({"following": False, "pending": True}, status=status.HTTP_200_OK)
+
         _, created = Follow.objects.get_or_create(follower=request.user, following=target)
         if created:
-            # Create in-app notification for the followed user
             from app.models import Notification
             Notification.objects.create(
                 user=target,
@@ -979,13 +1033,15 @@ class FollowView:
                 title=f"@{request.user.username} started following you",
                 body="",
             )
-        return Response({"following": True}, status=status.HTTP_200_OK)
+        return Response({"following": True, "pending": False}, status=status.HTTP_200_OK)
 
     @staticmethod
     @api_view(["DELETE"])
     @permission_classes([IsAuthenticated])
     def unfollow(request, user_id):
         Follow.objects.filter(follower=request.user, following_id=user_id).delete()
+        # Also cancel any pending follow request
+        FollowRequest.objects.filter(from_user=request.user, to_user_id=user_id).delete()
         return Response({"following": False}, status=status.HTTP_200_OK)
 
     @staticmethod
@@ -1029,6 +1085,248 @@ class FollowView:
         # All these users are followed by request.user
         following_ids = set(following_id_list)
         return Response([_serialize_user(u, request.user, following_ids=following_ids) for u in users])
+
+
+class FollowRequestView:
+    """
+    GET    /users/me/follow-requests/         — list pending requests I received
+    POST   /users/follow-requests/:id/accept/ — accept a request
+    DELETE /users/follow-requests/:id/reject/ — reject / cancel a request
+    """
+
+    @staticmethod
+    @api_view(["GET"])
+    @permission_classes([IsAuthenticated])
+    def list_requests(request):
+        reqs = FollowRequest.objects.filter(
+            to_user=request.user, status=FollowRequest.STATUS_PENDING
+        ).select_related("from_user").order_by("-created_at")
+        data = [
+            {
+                "id": r.id,
+                "from_user": {
+                    "id": str(r.from_user.id),
+                    "username": r.from_user.username,
+                    "avatar": _presign_avatar(r.from_user.avatar),
+                    "bio": r.from_user.bio,
+                },
+                "created_at": r.created_at,
+            }
+            for r in reqs
+        ]
+        return Response(data, status=status.HTTP_200_OK)
+
+    @staticmethod
+    @api_view(["POST"])
+    @permission_classes([IsAuthenticated])
+    def accept_request(request, request_id):
+        try:
+            req = FollowRequest.objects.get(
+                id=request_id, to_user=request.user, status=FollowRequest.STATUS_PENDING
+            )
+        except FollowRequest.DoesNotExist:
+            return Response({"error": "Request not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        Follow.objects.get_or_create(follower=req.from_user, following=request.user)
+        req.delete()
+
+        from app.models import Notification
+        Notification.objects.create(
+            user=req.from_user,
+            notif_type="recipient_added",
+            title=f"@{request.user.username} accepted your follow request",
+            body="",
+        )
+        return Response({"accepted": True}, status=status.HTTP_200_OK)
+
+    @staticmethod
+    @api_view(["DELETE"])
+    @permission_classes([IsAuthenticated])
+    def reject_request(request, request_id):
+        FollowRequest.objects.filter(id=request_id, to_user=request.user).delete()
+        return Response({"rejected": True}, status=status.HTTP_200_OK)
+
+
+class EmailOTPView:
+    """OTP-based email verification for registration."""
+
+    @staticmethod
+    @api_view(["POST"])
+    @permission_classes([AllowAny])
+    def send_otp(request):
+        email = request.data.get("email", "").strip().lower()
+        if not email or "@" not in email or "." not in email:
+            return Response({"error": "Valid email address required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Invalidate any existing unused OTPs for this email
+        EmailOTP.objects.filter(email=email, is_used=False).update(is_used=True)
+
+        otp = f"{random.randint(100000, 999999)}"
+        record = EmailOTP.objects.create(email=email, otp=otp)
+
+        print(f"\n{'='*55}")
+        print(f"  FUTRR — EMAIL VERIFICATION OTP")
+        print(f"  Email  : {email}")
+        print(f"  Code   : {otp}")
+        print(f"  Expires: {record.expires_at.strftime('%H:%M:%S UTC')}")
+        print(f"{'='*55}\n")
+
+        return Response({"message": "Verification code sent"}, status=status.HTTP_200_OK)
+
+    @staticmethod
+    @api_view(["POST"])
+    @permission_classes([AllowAny])
+    def verify_otp(request):
+        email = request.data.get("email", "").strip().lower()
+        otp = request.data.get("otp", "").strip()
+
+        if not email or not otp:
+            return Response({"error": "Email and code are required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            record = EmailOTP.objects.filter(
+                email=email, otp=otp, is_used=False
+            ).latest("created_at")
+        except EmailOTP.DoesNotExist:
+            return Response({"error": "Invalid or expired code"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not record.is_valid():
+            return Response(
+                {"error": "Code has expired. Please request a new one."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        token = secrets.token_urlsafe(32)
+        record.session_token = token
+        record.is_used = True
+        record.save(update_fields=["session_token", "is_used"])
+
+        return Response({"verified": True, "session_token": token}, status=status.HTTP_200_OK)
+
+
+class RegistrationView:
+    """Complete registration after email verification."""
+
+    @staticmethod
+    @api_view(["GET"])
+    @permission_classes([AllowAny])
+    def check_username(request):
+        import re
+        username = request.query_params.get("username", "").strip()
+        if not username:
+            return Response({"error": "Username required"}, status=status.HTTP_400_BAD_REQUEST)
+        if len(username) < 3:
+            return Response({"available": False, "reason": "Must be at least 3 characters"})
+        if len(username) > 30:
+            return Response({"available": False, "reason": "Must be 30 characters or fewer"})
+        if not re.match(r'^[a-zA-Z0-9_.]+$', username):
+            return Response({"available": False, "reason": "Only letters, numbers, _ and . allowed"})
+        available = not FutrrUser.objects.filter(username__iexact=username).exists()
+        return Response({"available": available})
+
+    @staticmethod
+    @api_view(["POST"])
+    @permission_classes([AllowAny])
+    def complete_registration(request):
+        email = request.data.get("email", "").strip().lower()
+        session_token = request.data.get("session_token", "").strip()
+        username = request.data.get("username", "").strip()
+        password = request.data.get("password", "")
+
+        if not all([email, session_token, username, password]):
+            return Response({"error": "All fields are required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Validate session token proves email was verified
+        try:
+            EmailOTP.objects.get(email=email, session_token=session_token, is_used=True)
+        except EmailOTP.DoesNotExist:
+            return Response(
+                {"error": "Email verification expired. Please start over."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if len(password) < 8:
+            return Response({"error": "Password must be at least 8 characters"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            user = FutrrUser.objects.create_user(
+                email=email,
+                username=username,
+                password=password,
+                is_email_verified=True,
+            )
+        except IntegrityError as e:
+            err = str(e).lower()
+            if "email" in err:
+                return Response({"error": "Email already registered"}, status=status.HTTP_400_BAD_REQUEST)
+            if "username" in err:
+                return Response({"error": "Username already taken"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": "Registration failed"}, status=status.HTTP_400_BAD_REQUEST)
+
+        refresh = RefreshToken.for_user(user)
+        return Response(
+            {
+                "message": "Account created",
+                "user": {
+                    "id": str(user.id),
+                    "email": user.email,
+                    "username": user.username,
+                    "isPreboarded": user.isPreboarded,
+                    "is_email_verified": user.is_email_verified,
+                },
+                "tokens": {
+                    "access": str(refresh.access_token),
+                    "refresh": str(refresh),
+                },
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class PreboardingView:
+    """Complete profile preboarding (steps 4-6 of onboarding)."""
+
+    @staticmethod
+    @api_view(["PATCH"])
+    @permission_classes([IsAuthenticated])
+    def complete(request):
+        from datetime import date as date_type
+
+        user = request.user
+        first_name = request.data.get("first_name", "").strip()
+        date_of_birth = request.data.get("date_of_birth")
+        country = request.data.get("country", "").strip()
+        tz = request.data.get("timezone", "UTC").strip()
+        notification_push = request.data.get("notification_push", True)
+
+        if not first_name:
+            return Response({"error": "Name is required"}, status=status.HTTP_400_BAD_REQUEST)
+        if not date_of_birth:
+            return Response({"error": "Date of birth is required"}, status=status.HTTP_400_BAD_REQUEST)
+        if not country:
+            return Response({"error": "Country is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            dob = date_type.fromisoformat(date_of_birth)
+            today = date_type.today()
+            age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+            if age < 18:
+                return Response(
+                    {"error": "You must be at least 18 years old to use Futrr"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        except ValueError:
+            return Response({"error": "Invalid date format. Use YYYY-MM-DD."}, status=status.HTTP_400_BAD_REQUEST)
+
+        user.first_name = first_name
+        user.date_of_birth = dob
+        user.country = country
+        user.timezone = tz
+        user.notification_push = bool(notification_push)
+        user.isPreboarded = True
+        user.save(update_fields=["first_name", "date_of_birth", "country", "timezone", "notification_push", "isPreboarded"])
+
+        return Response({"isPreboarded": True, "message": "Welcome to Futrr!"}, status=status.HTTP_200_OK)
 
 
 # ---------------------------------------------------------------------------
