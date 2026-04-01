@@ -1,5 +1,9 @@
+import logging
+
 import boto3
 from django.conf import settings
+
+logger = logging.getLogger("futrr.s3")
 
 _s3 = None
 
@@ -37,18 +41,28 @@ def upload_file(s3_key: str, file_obj, content_type: str) -> None:
     Use this for user-facing assets such as avatars.
     """
     client = _get_client()
-    client.upload_fileobj(
-        file_obj,
-        settings.AWS_S3_BUCKET,
-        s3_key,
-        ExtraArgs={"ContentType": content_type},
-    )
+    try:
+        client.upload_fileobj(
+            file_obj,
+            settings.AWS_S3_BUCKET,
+            s3_key,
+            ExtraArgs={"ContentType": content_type},
+        )
+        logger.info("upload_success", extra={"action": "upload_success", "s3_key": s3_key})
+    except Exception:
+        logger.error("upload_failed", extra={"action": "upload_failed", "s3_key": s3_key}, exc_info=True)
+        raise
 
 
 def delete_file(s3_key: str) -> None:
     """Delete a single object from S3."""
     client = _get_client()
-    client.delete_object(Bucket=settings.AWS_S3_BUCKET, Key=s3_key)
+    try:
+        client.delete_object(Bucket=settings.AWS_S3_BUCKET, Key=s3_key)
+        logger.info("delete_success", extra={"action": "delete_success", "s3_key": s3_key})
+    except Exception:
+        logger.error("delete_failed", extra={"action": "delete_failed", "s3_key": s3_key}, exc_info=True)
+        raise
 
 
 def delete_files(s3_keys: list) -> None:
@@ -59,13 +73,18 @@ def delete_files(s3_keys: list) -> None:
     if not s3_keys:
         return
     client = _get_client()
-    client.delete_objects(
-        Bucket=settings.AWS_S3_BUCKET,
-        Delete={
-            "Objects": [{"Key": k} for k in s3_keys],
-            "Quiet": True,
-        },
-    )
+    try:
+        client.delete_objects(
+            Bucket=settings.AWS_S3_BUCKET,
+            Delete={
+                "Objects": [{"Key": k} for k in s3_keys],
+                "Quiet": True,
+            },
+        )
+        logger.info("bulk_delete_success", extra={"action": "bulk_delete_success", "count": len(s3_keys)})
+    except Exception:
+        logger.error("bulk_delete_failed", extra={"action": "bulk_delete_failed", "count": len(s3_keys)}, exc_info=True)
+        raise
 
 
 def upload_encrypted_media(s3_key: str, file_obj, content_type: str) -> None:
@@ -80,12 +99,17 @@ def upload_encrypted_media(s3_key: str, file_obj, content_type: str) -> None:
     not a readable media file.
     """
     client = _get_client()
-    client.upload_fileobj(
-        file_obj,
-        settings.AWS_S3_BUCKET,
-        s3_key,
-        ExtraArgs={
-            "ContentType": content_type,
-            "ServerSideEncryption": "AES256",
-        },
-    )
+    try:
+        client.upload_fileobj(
+            file_obj,
+            settings.AWS_S3_BUCKET,
+            s3_key,
+            ExtraArgs={
+                "ContentType": content_type,
+                "ServerSideEncryption": "AES256",
+            },
+        )
+        logger.info("encrypted_upload_success", extra={"action": "encrypted_upload_success", "s3_key": s3_key})
+    except Exception:
+        logger.error("encrypted_upload_failed", extra={"action": "encrypted_upload_failed", "s3_key": s3_key}, exc_info=True)
+        raise

@@ -181,3 +181,80 @@ class EmailOTP(models.Model):
 
     def __str__(self):
         return f"OTP for {self.email}"
+
+
+class EmailQueue(models.Model):
+    """Queue for outbound emails with priority-based delivery."""
+
+    class Priority(models.TextChoices):
+        HIGH = "high", "High"    # OTP, password reset
+        LOW = "low", "Low"       # welcome, reset confirmation
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        SENT = "sent", "Sent"
+        FAILED = "failed", "Failed"
+
+    recipient = models.EmailField()
+    email_type = models.CharField(max_length=30)  # signup_otp, reset_otp, reset_confirm, welcome
+    priority = models.CharField(max_length=4, choices=Priority.choices)
+    payload = models.JSONField(default=dict)       # {otp, username, purpose, etc.}
+    status = models.CharField(max_length=7, choices=Status.choices, default=Status.PENDING)
+    created_at = models.DateTimeField(auto_now_add=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
+    attempts = models.IntegerField(default=0)
+    error = models.TextField(null=True, blank=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["status", "priority", "created_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.email_type} → {self.recipient} ({self.status})"
+
+
+class UserQuota(models.Model):
+    """Per-user usage limits. Created automatically on signup with free-tier defaults."""
+
+    user = models.OneToOneField(FutrrUser, on_delete=models.CASCADE, related_name="quota")
+
+    # Limits (NULL = unlimited)
+    max_event_participants = models.PositiveIntegerField(default=200)
+    max_capsule_recipients = models.PositiveIntegerField(default=5)
+
+    tier = models.CharField(max_length=20, default="free")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.user.username} — {self.tier}"
+
+
+class SupportTicket(models.Model):
+    """User-submitted support / upgrade requests visible in admin panel."""
+
+    class Category(models.TextChoices):
+        UPGRADE = "upgrade", "Upgrade Request"
+        BUG = "bug", "Bug Report"
+        GENERAL = "general", "General"
+
+    class Status(models.TextChoices):
+        OPEN = "open", "Open"
+        RESOLVED = "resolved", "Resolved"
+        CLOSED = "closed", "Closed"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(FutrrUser, on_delete=models.CASCADE, related_name="support_tickets")
+    category = models.CharField(max_length=10, choices=Category.choices, default=Category.GENERAL)
+    subject = models.CharField(max_length=200)
+    message = models.TextField()
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.OPEN)
+    admin_notes = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"[{self.category}] {self.subject} — {self.user.username}"

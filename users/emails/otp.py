@@ -3,9 +3,18 @@ from django.core.mail import EmailMultiAlternatives
 LOGO_URL = "https://futrr.s3.us-east-1.amazonaws.com/email-assets/futrr-banner-transparent.png"
 
 
-def send_otp_email(email, otp):
-    subject = "Your Futrr verification code"
-    text = f"Your verification code is {otp}. It expires in 10 minutes."
+def send_otp_email(email, otp, purpose="verify"):
+    """Send OTP email. purpose: 'verify' for signup, 'reset' for password reset."""
+    if purpose == "reset":
+        subject = "Reset your Futrr password"
+        heading = "Password Reset Code"
+        context_line = "Use this code to reset your password."
+    else:
+        subject = "Your Futrr verification code"
+        heading = "Verification Code"
+        context_line = "Use this code to verify your email address."
+
+    text = f"Your code is {otp}. It expires in 10 minutes. {context_line}"
     digits = list(str(otp))
 
     html = f"""<!DOCTYPE html>
@@ -22,11 +31,12 @@ def send_otp_email(email, otp):
         </td></tr>
 
         <!-- Accent bar -->
-        <tr><td style="padding:0 60px;"><div style="height:3px;border-radius:2px;background:linear-gradient(90deg,#EAA646,#E8924A);"></div></td></tr>
+        <tr><td style="padding:0 60px;"><div style="height:3px;border-radius:2px;background:#EAA646;"></div></td></tr>
 
         <!-- Heading -->
-        <tr><td style="padding:32px 40px 8px;text-align:center;">
-          <p style="margin:0;font-size:14px;font-weight:600;text-transform:uppercase;letter-spacing:2px;color:#C4956E;">Verification Code</p>
+        <tr><td style="padding:32px 40px 4px;text-align:center;">
+          <p style="margin:0;font-size:14px;font-weight:600;text-transform:uppercase;letter-spacing:2px;color:#C4956E;">{heading}</p>
+          <p style="margin:6px 0 0;font-size:13px;color:#9B9590;">{context_line}</p>
         </td></tr>
 
         <!-- OTP digits -->
@@ -36,12 +46,11 @@ def send_otp_email(email, otp):
           </tr></table>
         </td></tr>
 
-        <!-- Timer icon + expiry -->
+        <!-- Timer + expiry -->
         <tr><td style="padding:20px 40px 0;text-align:center;">
           <table role="presentation" cellpadding="0" cellspacing="0" align="center"><tr>
             <td style="vertical-align:middle;padding-right:8px;">
-              <!-- Hourglass SVG -->
-              <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='%23C4956E' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 22h14'/%3E%3Cpath d='M5 2h14'/%3E%3Cpath d='M17 22v-4.172a2 2 0 0 0-.586-1.414L12 12l-4.414 4.414A2 2 0 0 0 7 17.828V22'/%3E%3Cpath d='M7 2v4.172a2 2 0 0 0 .586 1.414L12 12l4.414-4.414A2 2 0 0 0 17 6.172V2'/%3E%3C/svg%3E" width="20" height="20" alt="" style="display:block;" />
+              <div style="width:20px;height:20px;border-radius:10px;border:2px solid #C4956E;text-align:center;line-height:18px;font-size:11px;color:#C4956E;font-weight:700;">&#8986;</div>
             </td>
             <td style="vertical-align:middle;">
               <p style="margin:0;font-size:13px;color:#9B9590;">Expires in <strong style="color:#C4956E;">10 minutes</strong></p>
@@ -51,13 +60,16 @@ def send_otp_email(email, otp):
 
         <!-- Security note -->
         <tr><td style="padding:24px 48px 0;text-align:center;">
-          <table role="presentation" cellpadding="0" cellspacing="0" align="center" style="background-color:#FBF9F6;border-radius:12px;padding:14px 20px;"><tr>
-            <td style="vertical-align:middle;padding-right:10px;">
-              <!-- Shield SVG -->
-              <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 24 24' fill='none' stroke='%239B9590' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z'/%3E%3Cpath d='m9 12 2 2 4-4'/%3E%3C/svg%3E" width="18" height="18" alt="" style="display:block;" />
-            </td>
-            <td style="vertical-align:middle;">
-              <p style="margin:0;font-size:12px;color:#9B9590;line-height:1.4;">If you didn't request this code, you can safely ignore this email.</p>
+          <table role="presentation" cellpadding="0" cellspacing="0" align="center" style="background-color:#FBF9F6;border-radius:12px;"><tr>
+            <td style="padding:14px 20px;">
+              <table role="presentation" cellpadding="0" cellspacing="0"><tr>
+                <td style="vertical-align:middle;padding-right:10px;">
+                  <div style="width:22px;height:22px;border-radius:11px;background-color:#E8E4DE;text-align:center;line-height:22px;font-size:12px;color:#9B9590;font-weight:700;">&#10003;</div>
+                </td>
+                <td style="vertical-align:middle;">
+                  <p style="margin:0;font-size:12px;color:#9B9590;line-height:1.4;">If you didn't request this code, you can safely ignore this email.</p>
+                </td>
+              </tr></table>
             </td>
           </tr></table>
         </td></tr>

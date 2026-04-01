@@ -11,6 +11,30 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
 from pathlib import Path
+import os
+import json
+import logging
+from dotenv import load_dotenv
+
+
+class JsonFormatter(logging.Formatter):
+    """JSON log formatter for CloudWatch Log Insights parsing."""
+
+    def format(self, record):
+        log = {
+            "timestamp": self.formatTime(record, "%Y-%m-%dT%H:%M:%SZ"),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        for key in ("category", "method", "path", "status_code", "duration_ms",
+                     "user_id", "action", "email", "s3_key", "error", "ip"):
+            val = getattr(record, key, None)
+            if val is not None:
+                log[key] = val
+        if record.exc_info and record.exc_info[0]:
+            log["exception"] = self.formatException(record.exc_info)
+        return json.dumps(log)
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -23,9 +47,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = 'django-insecure-__-ilb=(+ry33#r9#*!bbz*4$)no*)r03k(@7b_dmq%#u72ud$'
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.getenv("DEBUG", "True").lower() in ("true", "1", "yes")
 
-ALLOWED_HOSTS = ['api.futrr.app', 'localhost', '10.0.0.104']
+ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "localhost").split(",") + ["10.0.0.104"]
 
 CSRF_TRUSTED_ORIGINS = [
     "https://api.futrr.app",
@@ -50,6 +74,7 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    "futrr_restapi.middleware.HealthCheckMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     'django.middleware.security.SecurityMiddleware',
     "whitenoise.middleware.WhiteNoiseMiddleware",
@@ -59,6 +84,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'futrr_restapi.request_logging.RequestLoggingMiddleware',
 ]
 
 CORS_ALLOW_ALL_ORIGINS = True
@@ -97,7 +123,7 @@ ROOT_URLCONF = 'futrr_restapi.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
+        'DIRS': [BASE_DIR / 'templates'],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -156,6 +182,7 @@ EMAIL_BACKEND = "django_ses.SESBackend"
 
 AWS_SES_REGION_NAME = "us-east-1"
 AWS_SES_REGION_ENDPOINT = "email.us-east-1.amazonaws.com"
+AWS_SES_AUTO_THROTTLE = None  # We handle rate limiting in our queue processor
 
 DEFAULT_FROM_EMAIL = "Futrr <no-reply@futrr.app>"
 
@@ -177,6 +204,34 @@ USE_TZ = True
 STATIC_URL = "/static/"
 STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
 STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
+
+# ── Logging ──────────────────────────────────
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "json": {"()": "futrr_restapi.settings.JsonFormatter"},
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "json",
+        },
+    },
+    "loggers": {
+        "futrr.api": {"handlers": ["console"], "level": "INFO", "propagate": False},
+        "futrr.auth": {"handlers": ["console"], "level": "INFO", "propagate": False},
+        "futrr.email": {"handlers": ["console"], "level": "INFO", "propagate": False},
+        "futrr.s3": {"handlers": ["console"], "level": "INFO", "propagate": False},
+        "futrr.security": {"handlers": ["console"], "level": "INFO", "propagate": False},
+        "django.request": {"handlers": ["console"], "level": "WARNING", "propagate": False},
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": "WARNING",
+    },
+}
 
 # AWS
 AWS_REGION    = os.getenv("AWS_REGION", "us-east-1")

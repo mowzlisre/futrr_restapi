@@ -1,5 +1,6 @@
 import hashlib
 import hmac as hmac_mod
+import logging
 import uuid
 from django.utils import timezone
 from rest_framework import status
@@ -9,7 +10,10 @@ from rest_framework.views import APIView
 
 from .models import Capsule, CapsuleContent, CapsuleEncryptionKey, CapsuleFavorite, CapsulePin, CapsuleRecipient, Event, Notification
 from .s3 import generate_presigned_url, upload_encrypted_media, upload_file
-from users.models import FutrrUser
+from users.models import FutrrUser, UserQuota
+
+api_logger = logging.getLogger("futrr.api")
+s3_logger = logging.getLogger("futrr.s3")
 
 
 def _verify_passphrase(passphrase: str, enc_key) -> bool:
@@ -239,6 +243,7 @@ class CapsuleListCreateView(APIView):
             unlock_radius_meters=request.data.get("unlock_radius_meters", 100),
             passphrase_hint=request.data.get("passphrase_hint", ""),
         )
+        api_logger.info("capsule_created", extra={"action": "capsule_created", "user_id": str(request.user.id), "category": "capsules"})
         return Response(_serialize_capsule(capsule), status=status.HTTP_201_CREATED)
 
 
@@ -298,6 +303,7 @@ class CapsuleDetailView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         capsule.delete()
+        api_logger.info("capsule_deleted", extra={"action": "capsule_deleted", "user_id": str(request.user.id), "category": "capsules"})
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -320,6 +326,20 @@ class CapsuleRecipientView(APIView):
             return Response(
                 {"error": "Cannot add recipients to an unlocked capsule"},
                 status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # ── Quota: capsule recipient limit ──
+        quota, _ = UserQuota.objects.get_or_create(user=request.user)
+        current_count = CapsuleRecipient.objects.filter(capsule=capsule).count()
+        if current_count >= quota.max_capsule_recipients:
+            return Response(
+                {
+                    "error": "Recipient limit reached",
+                    "limit": quota.max_capsule_recipients,
+                    "current": current_count,
+                    "tier": quota.tier,
+                },
+                status=status.HTTP_403_FORBIDDEN,
             )
 
         user_id = request.data.get("user_id")
@@ -516,6 +536,7 @@ class CapsuleUnlockView(APIView):
 
         # Permanently transition status to UNLOCKED and persist
         capsule.unlock()
+        api_logger.info("capsule_unlocked", extra={"action": "capsule_unlocked", "user_id": str(request.user.id), "category": "capsules"})
 
         if is_recipient:
             capsule.capsule_recipients.filter(
@@ -608,7 +629,9 @@ class EventListCreateView(APIView):
             upload_file(s3_key, banner_file, banner_file.content_type or "image/jpeg")
             event.banner_image = s3_key
             event.save(update_fields=["banner_image"])
+            s3_logger.info("s3_upload", extra={"action": "s3_upload", "s3_key": s3_key, "user_id": str(request.user.id)})
 
+        api_logger.info("event_created", extra={"action": "event_created", "user_id": str(request.user.id), "category": "events"})
         return Response(_serialize_event(event), status=status.HTTP_201_CREATED)
 
 
@@ -737,6 +760,20 @@ class EventJoinView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # ── Quota: event participant limit (checked against organiser's quota) ──
+        organiser = event.created_by
+        if organiser:
+            quota, _ = UserQuota.objects.get_or_create(user=organiser)
+            participant_count = Capsule.objects.filter(event=event).count()
+            if participant_count >= quota.max_event_participants:
+                return Response(
+                    {
+                        "error": "This event has reached its participant limit",
+                        "limit": quota.max_event_participants,
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
         capsule = Capsule.objects.create(
             title=request.data.get("title", ""),
             description=request.data.get("description", ""),
@@ -852,6 +889,7 @@ class CapsuleContentView(APIView):
             mime = self._S3_CONTENT_TYPES.get(raw_type, "application/octet-stream")
             file_size = uploaded_file.size
             upload_encrypted_media(s3_key, uploaded_file, mime)
+            s3_logger.info("s3_upload", extra={"action": "s3_upload", "s3_key": s3_key, "user_id": str(request.user.id)})
 
             content = CapsuleContent.objects.create(
                 capsule=capsule,

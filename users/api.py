@@ -1,3 +1,5 @@
+import logging
+
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
@@ -7,7 +9,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from django.contrib.auth import authenticate
 from django.db import IntegrityError
 import requests
-from .models import FutrrUser, Follow, FollowRequest, PasswordResetToken, TwoFactorDevice, EmailOTP
+from .models import FutrrUser, Follow, FollowRequest, PasswordResetToken, TwoFactorDevice, EmailOTP, UserQuota, SupportTicket
 from django.db.models import Q
 from django.utils import timezone
 import secrets
@@ -15,6 +17,11 @@ import random
 import pyotp
 from app.s3 import upload_file, generate_presigned_url as s3_presign
 from .emails import send_otp_email, send_welcome_email
+from .emails.queue import enqueue_email
+
+auth_logger = logging.getLogger("futrr.auth")
+email_logger = logging.getLogger("futrr.email")
+security_logger = logging.getLogger("futrr.security")
 
 
 class SignUpView:
@@ -32,7 +39,7 @@ class SignUpView:
             email = request.data.get('email')
             username = request.data.get('username')
             password = request.data.get('password')
-            print(f"Received signup data: email={email}, username={username}, password={password}")
+            auth_logger.info("signup_attempt", extra={"action": "signup_attempt", "email": email})
             # Validate required fields
             if not all([email, username, password]):
                 return Response(
@@ -63,7 +70,8 @@ class SignUpView:
             
             # Generate tokens
             refresh = RefreshToken.for_user(user)
-            
+            auth_logger.info("signup_success", extra={"action": "signup_success", "email": email, "user_id": str(user.id)})
+
             return Response(
                 {
                     "message": "User created successfully",
@@ -124,12 +132,14 @@ class LoginView:
         ).first()
 
         if not user:
+            auth_logger.warning("login_failed", extra={"action": "login_failed", "error": "user_not_found"})
             return Response(
                 {"error": "Invalid credentials"},
                 status=status.HTTP_401_UNAUTHORIZED
             )
 
         if not user.check_password(password):
+            auth_logger.warning("login_failed", extra={"action": "login_failed", "email": user.email, "error": "wrong_password"})
             return Response(
                 {"error": "Invalid credentials"},
                 status=status.HTTP_401_UNAUTHORIZED
@@ -142,6 +152,7 @@ class LoginView:
             )
 
         refresh = RefreshToken.for_user(user)
+        auth_logger.info("login_success", extra={"action": "login_success", "email": user.email, "user_id": str(user.id)})
 
         return Response(
             {
@@ -254,7 +265,8 @@ class OAuthView:
             
             # Generate tokens
             refresh = RefreshToken.for_user(user)
-            
+            auth_logger.info("oauth_login", extra={"action": "oauth_login", "email": email, "user_id": str(user.id), "provider": "google", "created": created})
+
             return Response(
                 {
                     "message": "Google OAuth login successful",
@@ -353,7 +365,8 @@ class OAuthView:
             
             # Generate tokens
             refresh = RefreshToken.for_user(user)
-            
+            auth_logger.info("oauth_login", extra={"action": "oauth_login", "email": github_email, "user_id": str(user.id), "provider": "github", "created": created})
+
             return Response(
                 {
                     "message": "GitHub OAuth login successful",
@@ -379,124 +392,139 @@ class OAuthView:
 
 
 class PasswordResetView:
-    """Handle password reset requests and password updates"""
+    """OTP-based password reset flow."""
 
     @staticmethod
-    @api_view(['POST'])
+    @api_view(["POST"])
     @permission_classes([AllowAny])
     def forget_password(request):
-        """
-        Request password reset token.
-        Token will be printed to console (for development).
-        Expected fields: email
-        """
+        """Look up user by email or username, send a 6-digit OTP."""
+        identifier = request.data.get("identifier", "").strip().lower()
+        if not identifier:
+            return Response({"error": "Email or username is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = FutrrUser.objects.filter(
+            Q(email=identifier) | Q(username__iexact=identifier)
+        ).first()
+
+        if not user:
+            return Response({"error": "No account found"}, status=status.HTTP_404_NOT_FOUND)
+
+        # Invalidate previous unused OTPs for this email
+        EmailOTP.objects.filter(email=user.email, is_used=False).update(is_used=True)
+
+        otp = f"{random.randint(100000, 999999)}"
+        EmailOTP.objects.create(email=user.email, otp=otp)
+
         try:
-            email = request.data.get('email')
-
-            if not email:
-                return Response(
-                    {"error": "Email is required"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-            try:
-                user = FutrrUser.objects.get(email=email)
-            except FutrrUser.DoesNotExist:
-                # Don't reveal if email exists or not
-                return Response(
-                    {"message": "If email exists, password reset link has been sent"},
-                    status=status.HTTP_200_OK
-                )
-
-            # Create password reset token
-            reset_token = PasswordResetToken.objects.create(user=user)
-
-            # Print token to console (for development purposes)
-            print(f"\n{'='*60}")
-            print(f"PASSWORD RESET TOKEN FOR: {user.email}")
-            print(f"Token: {reset_token.token}")
-            print(f"Expires at: {reset_token.expires_at}")
-            print(f"{'='*60}\n")
-
-            return Response(
-                {
-                    "message": "Password reset token has been created",
-                    "token": reset_token.token,  # Include in response for testing
-                    "expires_in_minutes": 60
-                },
-                status=status.HTTP_200_OK
-            )
-
+            send_otp_email(user.email, otp, purpose="reset")
+            email_logger.info("email_sent", extra={"action": "email_sent", "email": user.email, "email_type": "reset_otp"})
         except Exception as e:
-            return Response(
-                {"error": str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+            email_logger.warning("reset_otp_throttled", extra={"action": "reset_otp_throttled", "email": user.email, "error": str(e)})
+            enqueue_email(user.email, "reset_otp", "high", {"email": user.email, "otp": otp})
+
+        # Mask email for display: a****z@gmail.com
+        e = user.email
+        local, domain = e.split("@")
+        masked = local[0] + "****" + local[-1] + "@" + domain
+
+        return Response({"message": "Verification code sent", "email": masked}, status=status.HTTP_200_OK)
 
     @staticmethod
-    @api_view(['POST'])
+    @api_view(["POST"])
+    @permission_classes([AllowAny])
+    def verify_reset_otp(request):
+        """Verify OTP and return a session token for password reset."""
+        identifier = request.data.get("identifier", "").strip().lower()
+        otp = request.data.get("otp", "").strip()
+
+        if not identifier or not otp:
+            return Response({"error": "Identifier and code are required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = FutrrUser.objects.filter(
+            Q(email=identifier) | Q(username__iexact=identifier)
+        ).first()
+        if not user:
+            return Response({"error": "Invalid code"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            record = EmailOTP.objects.filter(email=user.email, otp=otp, is_used=False).latest("created_at")
+        except EmailOTP.DoesNotExist:
+            return Response({"error": "Invalid or expired code"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not record.is_valid():
+            return Response({"error": "Code has expired. Please request a new one."}, status=status.HTTP_400_BAD_REQUEST)
+
+        token = secrets.token_urlsafe(32)
+        record.session_token = token
+        record.is_used = True
+        record.save(update_fields=["session_token", "is_used"])
+
+        return Response({"verified": True, "session_token": token}, status=status.HTTP_200_OK)
+
+    @staticmethod
+    @api_view(["POST"])
     @permission_classes([AllowAny])
     def reset_password(request):
-        """
-        Reset password using token.
-        Expected fields: token, new_password, confirm_password
-        """
+        """Reset password using session token from OTP verification."""
+        identifier = request.data.get("identifier", "").strip().lower()
+        session_token = request.data.get("session_token", "").strip()
+        new_password = request.data.get("new_password", "")
+        confirm_password = request.data.get("confirm_password", "")
+
+        if not all([identifier, session_token, new_password, confirm_password]):
+            return Response({"error": "All fields are required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if new_password != confirm_password:
+            return Response({"error": "Passwords do not match"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if len(new_password) < 8:
+            return Response({"error": "Password must be at least 8 characters"}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = FutrrUser.objects.filter(
+            Q(email=identifier) | Q(username__iexact=identifier)
+        ).first()
+        if not user:
+            return Response({"error": "Reset failed"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            EmailOTP.objects.get(email=user.email, session_token=session_token, is_used=True)
+        except EmailOTP.DoesNotExist:
+            return Response({"error": "Verification expired. Please start over."}, status=status.HTTP_400_BAD_REQUEST)
+
+        user.set_password(new_password)
+        user.save(update_fields=["password"])
+
+        enqueue_email(user.email, "reset_confirm", "low", {"email": user.email, "username": user.username})
+
+        return Response({"message": "Password reset successfully"}, status=status.HTTP_200_OK)
+
+    # Keep old token-based handler for backwards compat if needed
+    @staticmethod
+    @api_view(["POST"])
+    @permission_classes([AllowAny])
+    def reset_password_token(request):
         try:
             token = request.data.get('token')
             new_password = request.data.get('new_password')
             confirm_password = request.data.get('confirm_password')
-
-            # Validate required fields
             if not all([token, new_password, confirm_password]):
-                return Response(
-                    {"error": "Token, new_password, and confirm_password are required"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-            # Check password match
+                return Response({"error": "All fields required"}, status=status.HTTP_400_BAD_REQUEST)
             if new_password != confirm_password:
-                return Response(
-                    {"error": "Passwords do not match"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-            # Check password length
+                return Response({"error": "Passwords do not match"}, status=status.HTTP_400_BAD_REQUEST)
             if len(new_password) < 8:
-                return Response(
-                    {"error": "Password must be at least 8 characters long"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-            # Validate token
-            try:
-                reset_token = PasswordResetToken.objects.get(token=token)
-            except PasswordResetToken.DoesNotExist:
-                return Response(
-                    {"error": "Invalid token"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-            # Check if token is valid
+                return Response({"error": "Password must be at least 8 characters"}, status=status.HTTP_400_BAD_REQUEST)
+            reset_token = PasswordResetToken.objects.get(token=token)
             if not reset_token.is_valid():
-                return Response(
-                    {"error": "Token has expired or already used"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-            # Update password
+                return Response({"error": "Token has expired or already used"}, status=status.HTTP_400_BAD_REQUEST)
             user = reset_token.user
             user.set_password(new_password)
             user.save()
-
-            # Mark token as used
             reset_token.is_used = True
             reset_token.save()
-
-            return Response(
-                {"message": "Password reset successfully"},
-                status=status.HTTP_200_OK
-            )
-
+            return Response({"message": "Password reset successfully"}, status=status.HTTP_200_OK)
+        except PasswordResetToken.DoesNotExist:
+            return Response({"error": "Invalid token"}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             return Response(
                 {"error": str(e)},
@@ -569,13 +597,7 @@ class TwoFactorView:
                 )
                 response_data["message"] = "2FA device added. Scan QR code to verify."
 
-            print(f"\n{'='*60}")
-            print(f"2FA Device Created for: {request.user.email}")
-            print(f"Device Type: {device_type}")
-            print(f"Device Name: {device_name}")
-            if device_type == 'totp':
-                print(f"Secret: {device.secret}")
-            print(f"{'='*60}\n")
+            security_logger.info("2fa_device_added", extra={"action": "2fa_device_added", "email": request.user.email, "user_id": str(request.user.id)})
 
             return Response(response_data, status=status.HTTP_201_CREATED)
 
@@ -1159,6 +1181,9 @@ class EmailOTPView:
         if not email or "@" not in email or "." not in email:
             return Response({"error": "Valid email address required"}, status=status.HTTP_400_BAD_REQUEST)
 
+        if FutrrUser.objects.filter(email=email).exists():
+            return Response({"error": "An account with this email already exists"}, status=status.HTTP_409_CONFLICT)
+
         # Invalidate any existing unused OTPs for this email
         EmailOTP.objects.filter(email=email, is_used=False).update(is_used=True)
 
@@ -1167,8 +1192,10 @@ class EmailOTPView:
 
         try:
             send_otp_email(email, otp)
+            email_logger.info("email_sent", extra={"action": "email_sent", "email": email, "email_type": "signup_otp"})
         except Exception as e:
-            print(f"[OTP EMAIL FAILED] {email}: {e}")
+            email_logger.warning("signup_otp_throttled", extra={"action": "signup_otp_throttled", "email": email, "error": str(e)})
+            enqueue_email(email, "signup_otp", "high", {"email": email, "otp": otp})
 
         return Response({"message": "Verification code sent"}, status=status.HTTP_200_OK)
 
@@ -1205,6 +1232,16 @@ class EmailOTPView:
 
 class RegistrationView:
     """Complete registration after email verification."""
+
+    @staticmethod
+    @api_view(["GET"])
+    @permission_classes([AllowAny])
+    def check_email(request):
+        email = request.query_params.get("email", "").strip().lower()
+        if not email:
+            return Response({"error": "Email required"}, status=status.HTTP_400_BAD_REQUEST)
+        available = not FutrrUser.objects.filter(email=email).exists()
+        return Response({"available": available})
 
     @staticmethod
     @api_view(["GET"])
@@ -1261,15 +1298,6 @@ class RegistrationView:
             if "username" in err:
                 return Response({"error": "Username already taken"}, status=status.HTTP_400_BAD_REQUEST)
             return Response({"error": "Registration failed"}, status=status.HTTP_400_BAD_REQUEST)
-
-        print(f"[WELCOME EMAIL] Attempting to send to {user.email} ({user.username})")
-        try:
-            send_welcome_email(user.email, user.username)
-            print(f"[WELCOME EMAIL] Sent successfully to {user.email}")
-        except Exception as e:
-            import traceback
-            print(f"[WELCOME EMAIL FAILED] {user.email}: {e}")
-            traceback.print_exc()
 
         refresh = RefreshToken.for_user(user)
         return Response(
@@ -1334,6 +1362,8 @@ class PreboardingView:
         user.isPreboarded = True
         user.save(update_fields=["first_name", "date_of_birth", "country", "timezone", "notification_push", "isPreboarded"])
 
+        enqueue_email(user.email, "welcome", "low", {"email": user.email, "username": user.username})
+
         return Response({"isPreboarded": True, "message": "Welcome to Futrr!"}, status=status.HTTP_200_OK)
 
 
@@ -1380,3 +1410,79 @@ class AvatarUploadView:
 
         presigned_url = _presign_avatar(s3_key)
         return Response({"avatar": presigned_url}, status=status.HTTP_200_OK)
+
+
+# ---------------------------------------------------------------------------
+# Quota — show the user their current limits
+# ---------------------------------------------------------------------------
+
+class QuotaView:
+
+    @staticmethod
+    @api_view(["GET"])
+    @permission_classes([IsAuthenticated])
+    def get_quota(request):
+        quota, _ = UserQuota.objects.get_or_create(user=request.user)
+        from app.models import Capsule, CapsuleRecipient, Event
+        return Response({
+            "tier": quota.tier,
+            "limits": {
+                "max_event_participants": quota.max_event_participants,
+                "max_capsule_recipients": quota.max_capsule_recipients,
+            },
+            "usage": {
+                "events_created": Event.objects.filter(created_by=request.user).count(),
+                "capsules_created": Capsule.objects.filter(created_by=request.user).count(),
+            },
+        })
+
+
+# ---------------------------------------------------------------------------
+# Contact Support — submit tickets / upgrade requests
+# ---------------------------------------------------------------------------
+
+class SupportView:
+
+    @staticmethod
+    @api_view(["POST"])
+    @permission_classes([IsAuthenticated])
+    def create_ticket(request):
+        category = request.data.get("category", "general")
+        subject = (request.data.get("subject") or "").strip()
+        message = (request.data.get("message") or "").strip()
+
+        if not subject or not message:
+            return Response({"error": "subject and message are required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if category not in dict(SupportTicket.Category.choices):
+            category = "general"
+
+        ticket = SupportTicket.objects.create(
+            user=request.user,
+            category=category,
+            subject=subject[:200],
+            message=message,
+        )
+        return Response({
+            "id": str(ticket.id),
+            "category": ticket.category,
+            "subject": ticket.subject,
+            "status": ticket.status,
+            "created_at": ticket.created_at.isoformat(),
+        }, status=status.HTTP_201_CREATED)
+
+    @staticmethod
+    @api_view(["GET"])
+    @permission_classes([IsAuthenticated])
+    def my_tickets(request):
+        tickets = SupportTicket.objects.filter(user=request.user).order_by("-created_at")[:50]
+        return Response([
+            {
+                "id": str(t.id),
+                "category": t.category,
+                "subject": t.subject,
+                "status": t.status,
+                "created_at": t.created_at.isoformat(),
+            }
+            for t in tickets
+        ])

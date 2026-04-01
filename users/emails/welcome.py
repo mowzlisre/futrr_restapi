@@ -1,16 +1,49 @@
 from django.core.mail import EmailMultiAlternatives
 
 LOGO_URL = "https://futrr.s3.us-east-1.amazonaws.com/email-assets/futrr-banner-transparent.png"
+ICON_CAPSULE = "https://futrr.s3.us-east-1.amazonaws.com/email-assets/icon-capsule.png"
+ICON_GLOBE = "https://futrr.s3.us-east-1.amazonaws.com/email-assets/icon-globe.png"
+ICON_TIMELINE = "https://futrr.s3.us-east-1.amazonaws.com/email-assets/icon-timeline.png"
 
-# Inline SVG icons encoded for email (avoids emoji / unicode issues)
-ICON_CAPSULE = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='28' height='28' viewBox='0 0 24 24' fill='none' stroke='%23EAA646' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='3' width='18' height='18' rx='4'/%3E%3Cpath d='M3 12h18'/%3E%3Cpath d='M12 3v18'/%3E%3Ccircle cx='12' cy='12' r='2'/%3E%3C/svg%3E"
-ICON_DISCOVER = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='28' height='28' viewBox='0 0 24 24' fill='none' stroke='%23EAA646' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpolygon points='16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76'/%3E%3C/svg%3E"
-ICON_TIMELINE = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='28' height='28' viewBox='0 0 24 24' fill='none' stroke='%23EAA646' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpolyline points='12 6 12 12 16 14'/%3E%3C/svg%3E"
+
+def _feature_row(icon_url, title, body):
+    return f"""<tr><td style="padding:0 36px;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#FBF9F6;border-radius:14px;">
+    <tr>
+      <td style="width:62px;padding:16px 0 16px 16px;vertical-align:top;">
+        <img src="{icon_url}" alt="" width="44" height="44" style="display:block;border-radius:12px;" />
+      </td>
+      <td style="padding:16px 18px 16px 14px;vertical-align:top;">
+        <p style="margin:0 0 3px;font-size:15px;font-weight:600;color:#1A1A1A;">{title}</p>
+        <p style="margin:0;font-size:13px;color:#9B9590;line-height:1.45;">{body}</p>
+      </td>
+    </tr>
+  </table>
+</td></tr>
+<tr><td style="height:10px;"></td></tr>"""
 
 
 def send_welcome_email(email, username):
     subject = "Welcome to Futrr!"
     text = f"Hey {username}, welcome to Futrr! Start creating capsules and capture moments for the future."
+
+    features = (
+        _feature_row(
+            ICON_CAPSULE,
+            "Create Capsules",
+            "Write messages, add photos, videos, or audio &mdash; anything you want to preserve for the future.",
+        )
+        + _feature_row(
+            ICON_GLOBE,
+            "Discover &amp; Connect",
+            "Explore public capsules, find friends, and unlock shared memories together.",
+        )
+        + _feature_row(
+            ICON_TIMELINE,
+            "Your Timeline",
+            "Every capsule lands on your timeline &mdash; past, present, and future at a glance.",
+        )
+    )
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -26,7 +59,7 @@ def send_welcome_email(email, username):
         </td></tr>
 
         <!-- Accent bar -->
-        <tr><td style="padding:0 60px;"><div style="height:3px;border-radius:2px;background:linear-gradient(90deg,#EAA646,#E8924A);"></div></td></tr>
+        <tr><td style="padding:0 60px;"><div style="height:3px;border-radius:2px;background:#EAA646;"></div></td></tr>
 
         <!-- Greeting -->
         <tr><td style="padding:32px 40px 0;text-align:center;">
@@ -39,63 +72,11 @@ def send_welcome_email(email, username):
         <!-- Spacer -->
         <tr><td style="height:28px;"></td></tr>
 
-        <!-- Feature 1: Capsules -->
-        <tr><td style="padding:0 36px;">
-          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#FBF9F6;border-radius:14px;">
-            <tr>
-              <td style="width:56px;padding:18px 0 18px 18px;vertical-align:top;">
-                <div style="width:44px;height:44px;border-radius:12px;background-color:#FDF3E4;text-align:center;line-height:44px;">
-                  <img src="{ICON_CAPSULE}" width="24" height="24" alt="" style="display:inline-block;vertical-align:middle;" />
-                </div>
-              </td>
-              <td style="padding:18px 18px 18px 14px;vertical-align:top;">
-                <p style="margin:0 0 3px;font-size:15px;font-weight:600;color:#1A1A1A;">Create Capsules</p>
-                <p style="margin:0;font-size:13px;color:#9B9590;line-height:1.45;">Write messages, add photos, videos, or audio &mdash; anything you want to preserve for the future.</p>
-              </td>
-            </tr>
-          </table>
-        </td></tr>
-
-        <tr><td style="height:10px;"></td></tr>
-
-        <!-- Feature 2: Discover -->
-        <tr><td style="padding:0 36px;">
-          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#FBF9F6;border-radius:14px;">
-            <tr>
-              <td style="width:56px;padding:18px 0 18px 18px;vertical-align:top;">
-                <div style="width:44px;height:44px;border-radius:12px;background-color:#FDF3E4;text-align:center;line-height:44px;">
-                  <img src="{ICON_DISCOVER}" width="24" height="24" alt="" style="display:inline-block;vertical-align:middle;" />
-                </div>
-              </td>
-              <td style="padding:18px 18px 18px 14px;vertical-align:top;">
-                <p style="margin:0 0 3px;font-size:15px;font-weight:600;color:#1A1A1A;">Discover &amp; Connect</p>
-                <p style="margin:0;font-size:13px;color:#9B9590;line-height:1.45;">Explore public capsules, find friends, and unlock shared memories together.</p>
-              </td>
-            </tr>
-          </table>
-        </td></tr>
-
-        <tr><td style="height:10px;"></td></tr>
-
-        <!-- Feature 3: Timeline -->
-        <tr><td style="padding:0 36px;">
-          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#FBF9F6;border-radius:14px;">
-            <tr>
-              <td style="width:56px;padding:18px 0 18px 18px;vertical-align:top;">
-                <div style="width:44px;height:44px;border-radius:12px;background-color:#FDF3E4;text-align:center;line-height:44px;">
-                  <img src="{ICON_TIMELINE}" width="24" height="24" alt="" style="display:inline-block;vertical-align:middle;" />
-                </div>
-              </td>
-              <td style="padding:18px 18px 18px 14px;vertical-align:top;">
-                <p style="margin:0 0 3px;font-size:15px;font-weight:600;color:#1A1A1A;">Your Timeline</p>
-                <p style="margin:0;font-size:13px;color:#9B9590;line-height:1.45;">Every capsule lands on your timeline &mdash; past, present, and future at a glance.</p>
-              </td>
-            </tr>
-          </table>
-        </td></tr>
+        <!-- Feature cards -->
+        {features}
 
         <!-- CTA -->
-        <tr><td style="padding:28px 40px 0;text-align:center;">
+        <tr><td style="padding:18px 40px 0;text-align:center;">
           <p style="margin:0;font-size:15px;color:#6B6560;line-height:1.5;">Open the app and create your first capsule.<br/>The future is waiting.</p>
         </td></tr>
 

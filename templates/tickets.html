@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Support Tickets — Futrr Admin</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; background:#F5F2ED; color:#1A1A1A; }
+    .navbar { background:#1A1A1A; color:#fff; padding:0 24px; height:52px; display:flex; align-items:center; justify-content:space-between; position:fixed; top:0; left:0; right:0; z-index:10; }
+    .navbar .brand { font-size:18px; font-weight:700; color:#EAA646; letter-spacing:1px; }
+    .navbar .user { font-size:13px; color:#999; }
+    .sidebar { position:fixed; top:52px; left:0; bottom:0; width:200px; background:#fff; border-right:1px solid #E8E4DE; padding:20px 0; }
+    .sidebar a { display:block; padding:10px 24px; font-size:14px; color:#6B6560; text-decoration:none; border-left:3px solid transparent; }
+    .sidebar a:hover { background:#FAF8F5; color:#1A1A1A; }
+    .sidebar a.active { border-left-color:#EAA646; color:#1A1A1A; font-weight:600; background:#FAF8F5; }
+    .main { margin-left:200px; margin-top:52px; padding:28px 32px; }
+    .stats { display:flex; gap:16px; margin-bottom:24px; }
+    .stat-card { background:#fff; border-radius:12px; padding:16px 20px; flex:1; box-shadow:0 1px 4px rgba(0,0,0,0.04); }
+    .stat-card .label { font-size:12px; color:#9B9590; text-transform:uppercase; letter-spacing:1px; margin-bottom:4px; }
+    .stat-card .value { font-size:28px; font-weight:700; }
+    .stat-card.open .value { color:#E8A838; }
+    .stat-card.resolved .value { color:#4CAF50; }
+    .stat-card.closed .value { color:#9B9590; }
+    .stat-card.total .value { color:#1A1A1A; }
+    .filters { display:flex; gap:10px; margin-bottom:16px; align-items:center; }
+    .filters select { padding:7px 12px; border:1px solid #E8E4DE; border-radius:8px; font-size:13px; background:#fff; color:#1A1A1A; }
+    .filters label { font-size:13px; color:#6B6560; }
+    table { width:100%; border-collapse:collapse; background:#fff; border-radius:12px; overflow:hidden; box-shadow:0 1px 4px rgba(0,0,0,0.04); }
+    th { background:#FAF8F5; padding:10px 14px; font-size:12px; text-transform:uppercase; letter-spacing:0.5px; color:#9B9590; text-align:left; font-weight:600; border-bottom:1px solid #E8E4DE; }
+    td { padding:10px 14px; font-size:13px; border-bottom:1px solid #F0EDEA; vertical-align:top; }
+    tr:last-child td { border-bottom:none; }
+    tr:hover { background:#FDFCFB; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:20px; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:0.5px; }
+    .badge.open { background:#FFF3E0; color:#E8A838; }
+    .badge.resolved { background:#E8F5E9; color:#388E3C; }
+    .badge.closed { background:#F5F5F5; color:#757575; }
+    .badge.upgrade { background:#E8EAF6; color:#3949AB; }
+    .badge.bug { background:#FFEBEE; color:#C62828; }
+    .badge.general { background:#F5F5F5; color:#616161; }
+    .msg-cell { max-width:300px; }
+    .msg-text { font-size:12px; color:#666; word-break:break-word; max-height:40px; overflow:hidden; cursor:pointer; }
+    .msg-text:hover { max-height:none; }
+    .status-form { display:inline; }
+    .status-form select { padding:3px 8px; border:1px solid #E8E4DE; border-radius:6px; font-size:11px; background:#fff; cursor:pointer; }
+    .pagination { display:flex; gap:6px; margin-top:20px; justify-content:center; align-items:center; }
+    .pagination a, .pagination span { padding:6px 12px; border-radius:6px; font-size:13px; text-decoration:none; color:#6B6560; }
+    .pagination a:hover { background:#E8E4DE; }
+    .pagination .current { background:#1A1A1A; color:#fff; font-weight:600; }
+    .pagination .disabled { color:#ccc; pointer-events:none; }
+  </style>
+</head>
+<body>
+
+  <nav class="navbar">
+    <div class="brand">FUTRR</div>
+    <div class="user">{{ user.email }}</div>
+  </nav>
+
+  <aside class="sidebar">
+    {% for label, url in nav %}
+    <a href="{{ url }}" {% if label == active_page %}class="active"{% endif %}>{{ label }}</a>
+    {% endfor %}
+  </aside>
+
+  <div class="main">
+    <h2 style="margin-bottom:20px;font-size:20px;font-weight:600;">Support Tickets</h2>
+
+    <div class="stats">
+      <div class="stat-card total"><div class="label">Total</div><div class="value">{{ counts.total }}</div></div>
+      <div class="stat-card open"><div class="label">Open</div><div class="value">{{ counts.open }}</div></div>
+      <div class="stat-card resolved"><div class="label">Resolved</div><div class="value">{{ counts.resolved }}</div></div>
+      <div class="stat-card closed"><div class="label">Closed</div><div class="value">{{ counts.closed }}</div></div>
+    </div>
+
+    <form method="get" class="filters">
+      <label>Status:</label>
+      <select name="status" onchange="this.form.submit()">
+        <option value="">All</option>
+        <option value="open" {% if filter_status == "open" %}selected{% endif %}>Open</option>
+        <option value="resolved" {% if filter_status == "resolved" %}selected{% endif %}>Resolved</option>
+        <option value="closed" {% if filter_status == "closed" %}selected{% endif %}>Closed</option>
+      </select>
+      <label>Category:</label>
+      <select name="category" onchange="this.form.submit()">
+        <option value="">All</option>
+        <option value="upgrade" {% if filter_category == "upgrade" %}selected{% endif %}>Upgrade</option>
+        <option value="bug" {% if filter_category == "bug" %}selected{% endif %}>Bug</option>
+        <option value="general" {% if filter_category == "general" %}selected{% endif %}>General</option>
+      </select>
+    </form>
+
+    <table>
+      <thead>
+        <tr>
+          <th>User</th>
+          <th>Category</th>
+          <th>Subject</th>
+          <th>Message</th>
+          <th>Status</th>
+          <th>Created</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for t in page.object_list %}
+        <tr>
+          <td>
+            <strong>{{ t.user.username }}</strong><br>
+            <span style="font-size:11px;color:#999;">{{ t.user.email }}</span>
+          </td>
+          <td><span class="badge {{ t.category }}">{{ t.category }}</span></td>
+          <td>{{ t.subject }}</td>
+          <td class="msg-cell"><div class="msg-text">{{ t.message }}</div></td>
+          <td><span class="badge {{ t.status }}">{{ t.status }}</span></td>
+          <td>{{ t.created_at|date:"M d, H:i" }}</td>
+          <td>
+            <form method="post" action="/api/su/tickets/{{ t.id }}/status/" class="status-form">
+              {% csrf_token %}
+              <select name="status" onchange="this.form.submit()">
+                <option value="open" {% if t.status == "open" %}selected{% endif %}>Open</option>
+                <option value="resolved" {% if t.status == "resolved" %}selected{% endif %}>Resolved</option>
+                <option value="closed" {% if t.status == "closed" %}selected{% endif %}>Closed</option>
+              </select>
+            </form>
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="7" style="text-align:center;padding:32px;color:#9B9590;">No tickets</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    {% if page.has_other_pages %}
+    <div class="pagination">
+      {% if page.has_previous %}
+        <a href="?page=1&status={{ filter_status }}&category={{ filter_category }}">&laquo;</a>
+        <a href="?page={{ page.previous_page_number }}&status={{ filter_status }}&category={{ filter_category }}">&lsaquo;</a>
+      {% else %}
+        <span class="disabled">&laquo;</span>
+        <span class="disabled">&lsaquo;</span>
+      {% endif %}
+      {% for num in page.paginator.page_range %}
+        {% if num == page.number %}
+          <span class="current">{{ num }}</span>
+        {% elif num > page.number|add:"-3" and num < page.number|add:"3" %}
+          <a href="?page={{ num }}&status={{ filter_status }}&category={{ filter_category }}">{{ num }}</a>
+        {% endif %}
+      {% endfor %}
+      {% if page.has_next %}
+        <a href="?page={{ page.next_page_number }}&status={{ filter_status }}&category={{ filter_category }}">&rsaquo;</a>
+        <a href="?page={{ page.paginator.num_pages }}&status={{ filter_status }}&category={{ filter_category }}">&raquo;</a>
+      {% else %}
+        <span class="disabled">&rsaquo;</span>
+        <span class="disabled">&raquo;</span>
+      {% endif %}
+    </div>
+    {% endif %}
+  </div>
+
+</body>
+</html>

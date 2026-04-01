@@ -5,6 +5,7 @@ from .api import (
     UserProfileView, DeleteAccountView,
     UserSearchView, PublicUserProfileView, FollowView, FollowRequestView,
     AvatarUploadView, EmailOTPView, RegistrationView, PreboardingView,
+    QuotaView, SupportView,
 )
 
 urlpatterns = [
@@ -19,6 +20,7 @@ urlpatterns = [
 
     # Password management
     path('password/forget/', PasswordResetView.forget_password, name='forget-password'),
+    path('password/verify-otp/', PasswordResetView.verify_reset_otp, name='verify-reset-otp'),
     path('password/reset/', PasswordResetView.reset_password, name='reset-password'),
     path('password/change/', ChangePasswordView.change_password, name='change-password'),
 
@@ -31,6 +33,7 @@ urlpatterns = [
     # Registration (OTP-based)
     path('email/send-otp/', EmailOTPView.send_otp, name='send-otp'),
     path('email/verify-otp/', EmailOTPView.verify_otp, name='verify-otp'),
+    path('check-email/', RegistrationView.check_email, name='check-email'),
     path('check-username/', RegistrationView.check_username, name='check-username'),
     path('register/', RegistrationView.complete_registration, name='complete-registration'),
     path('preboarding/complete/', PreboardingView.complete, name='preboarding-complete'),
@@ -50,4 +53,9 @@ urlpatterns = [
     path('<uuid:user_id>/', PublicUserProfileView.get_user, name='user-profile'),
     path('<uuid:user_id>/follow/', FollowView.follow, name='user-follow'),
     path('<uuid:user_id>/unfollow/', FollowView.unfollow, name='user-unfollow'),
+
+    # Quota & Support
+    path('me/quota/', QuotaView.get_quota, name='user-quota'),
+    path('support/', SupportView.create_ticket, name='support-create'),
+    path('support/tickets/', SupportView.my_tickets, name='support-my-tickets'),
 ]
