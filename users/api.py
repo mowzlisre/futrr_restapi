@@ -14,6 +14,7 @@ import secrets
 import random
 import pyotp
 from app.s3 import upload_file, generate_presigned_url as s3_presign
+from .emails import send_otp_email, send_welcome_email
 
 
 class SignUpView:
@@ -1164,12 +1165,10 @@ class EmailOTPView:
         otp = f"{random.randint(100000, 999999)}"
         record = EmailOTP.objects.create(email=email, otp=otp)
 
-        print(f"\n{'='*55}")
-        print(f"  FUTRR — EMAIL VERIFICATION OTP")
-        print(f"  Email  : {email}")
-        print(f"  Code   : {otp}")
-        print(f"  Expires: {record.expires_at.strftime('%H:%M:%S UTC')}")
-        print(f"{'='*55}\n")
+        try:
+            send_otp_email(email, otp)
+        except Exception as e:
+            print(f"[OTP EMAIL FAILED] {email}: {e}")
 
         return Response({"message": "Verification code sent"}, status=status.HTTP_200_OK)
 
@@ -1262,6 +1261,15 @@ class RegistrationView:
             if "username" in err:
                 return Response({"error": "Username already taken"}, status=status.HTTP_400_BAD_REQUEST)
             return Response({"error": "Registration failed"}, status=status.HTTP_400_BAD_REQUEST)
+
+        print(f"[WELCOME EMAIL] Attempting to send to {user.email} ({user.username})")
+        try:
+            send_welcome_email(user.email, user.username)
+            print(f"[WELCOME EMAIL] Sent successfully to {user.email}")
+        except Exception as e:
+            import traceback
+            print(f"[WELCOME EMAIL FAILED] {user.email}: {e}")
+            traceback.print_exc()
 
         refresh = RefreshToken.for_user(user)
         return Response(

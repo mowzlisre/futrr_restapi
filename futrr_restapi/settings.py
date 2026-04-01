@@ -152,6 +152,13 @@ AUTH_PASSWORD_VALIDATORS = [
 
 AUTH_USER_MODEL = "users.FutrrUser"
 
+EMAIL_BACKEND = "django_ses.SESBackend"
+
+AWS_SES_REGION_NAME = "us-east-1"
+AWS_SES_REGION_ENDPOINT = "email.us-east-1.amazonaws.com"
+
+DEFAULT_FROM_EMAIL = "Futrr <no-reply@futrr.app>"
+
 # Internationalization
 # https://docs.djangoproject.com/en/6.0/topics/i18n/
 
