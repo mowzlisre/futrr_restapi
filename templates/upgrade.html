@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Upgrade Users — Futrr Admin</title>
+  <title>Subscriptions — Futrr Admin</title>
   <style>
     * { margin:0; padding:0; box-sizing:border-box; }
     body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; background:#F5F2ED; color:#1A1A1A; }
@@ -14,7 +14,7 @@
     .sidebar a { display:block; padding:10px 24px; font-size:14px; color:#6B6560; text-decoration:none; border-left:3px solid transparent; }
     .sidebar a:hover { background:#FAF8F5; color:#1A1A1A; }
     .sidebar a.active { border-left-color:#EAA646; color:#1A1A1A; font-weight:600; background:#FAF8F5; }
-    .main { margin-left:200px; margin-top:52px; padding:28px 32px; max-width:800px; }
+    .main { margin-left:200px; margin-top:52px; padding:28px 32px; max-width:900px; }
 
     .search-box { display:flex; gap:10px; margin-bottom:28px; }
     .search-box input { flex:1; padding:10px 16px; border:1px solid #E8E4DE; border-radius:10px; font-size:14px; background:#fff; }
@@ -22,11 +22,15 @@
     .search-box button:hover { background:#333; }
 
     .card { background:#fff; border-radius:12px; padding:24px 28px; box-shadow:0 1px 4px rgba(0,0,0,0.04); margin-bottom:20px; }
-    .card h3 { font-size:16px; margin-bottom:16px; font-weight:600; }
-    .card .row { display:flex; gap:20px; margin-bottom:14px; align-items:center; }
-    .card .row label { font-size:13px; color:#6B6560; min-width:160px; }
-    .card .row input, .card .row select { padding:8px 14px; border:1px solid #E8E4DE; border-radius:8px; font-size:14px; background:#fff; flex:1; }
-    .card .row .val { font-size:14px; font-weight:500; }
+    .card h3 { font-size:16px; margin-bottom:16px; font-weight:600; color:#1A1A1A; }
+    .card .section-label { font-size:11px; color:#9B9590; text-transform:uppercase; letter-spacing:1px; font-weight:600; margin:20px 0 10px; padding-bottom:6px; border-bottom:1px solid #F0EDE8; }
+    .grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+    .field { display:flex; flex-direction:column; gap:4px; }
+    .field label { font-size:12px; color:#6B6560; font-weight:500; }
+    .field input, .field select, .field textarea { padding:8px 12px; border:1px solid #E8E4DE; border-radius:8px; font-size:14px; background:#fff; }
+    .field textarea { resize:vertical; min-height:60px; font-family:inherit; }
+    .field .hint { font-size:11px; color:#B0AAA4; margin-top:2px; }
+    .field-full { grid-column:1/-1; }
 
     .user-info { display:flex; gap:16px; align-items:center; margin-bottom:20px; }
     .user-info .avatar { width:48px; height:48px; border-radius:50%; background:#E8E4DE; display:flex; align-items:center; justify-content:center; font-size:18px; font-weight:700; color:#6B6560; }
@@ -36,13 +40,20 @@
 
     .badge { display:inline-block; padding:3px 10px; border-radius:20px; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:0.5px; }
     .badge.free { background:#F5F5F5; color:#616161; }
+    .badge.free\+ { background:#E8F5E9; color:#2E7D32; }
     .badge.pro { background:#E8EAF6; color:#3949AB; }
     .badge.enterprise { background:#FFF3E0; color:#E65100; }
 
-    .save-btn { padding:10px 28px; background:#EAA646; color:#fff; border:none; border-radius:10px; font-size:14px; font-weight:600; cursor:pointer; margin-top:8px; }
+    .actions { display:flex; gap:12px; align-items:center; margin-top:20px; }
+    .save-btn { padding:10px 28px; background:#EAA646; color:#fff; border:none; border-radius:10px; font-size:14px; font-weight:600; cursor:pointer; }
     .save-btn:hover { background:#D4922E; }
+    .clear-btn { padding:10px 20px; background:#fff; color:#6B6560; border:1px solid #E8E4DE; border-radius:10px; font-size:13px; cursor:pointer; }
+    .clear-btn:hover { background:#FAF8F5; }
 
     .not-found { text-align:center; padding:40px; color:#9B9590; font-size:14px; }
+
+    .expiry-row { display:flex; gap:10px; align-items:end; }
+    .expiry-row .field { flex:1; }
   </style>
 </head>
 <body>
@@ -59,7 +70,7 @@
   </aside>
 
   <div class="main">
-    <h2 style="margin-bottom:20px;font-size:20px;font-weight:600;">Upgrade User Limits</h2>
+    <h2 style="margin-bottom:20px;font-size:20px;font-weight:600;">Subscription Manager</h2>
 
     <form method="get" class="search-box">
       <input type="text" name="q" value="{{ search }}" placeholder="Search by email or username...">
@@ -80,35 +91,110 @@
           <div class="name">@{{ selected_user.username }}</div>
           <div class="email">{{ selected_user.email }}</div>
         </div>
-        <span class="badge {{ quota.tier }}">{{ quota.tier }}</span>
+        <span class="badge {{ sub.tier }}">{{ sub.tier }}</span>
       </div>
 
       <form method="post" action="/api/su/upgrade/save/">
         {% csrf_token %}
         <input type="hidden" name="user_id" value="{{ selected_user.id }}">
 
-        <h3>Quota Settings</h3>
+        <h3>Plan Settings</h3>
 
-        <div class="row">
-          <label>Tier</label>
-          <select name="tier">
-            <option value="free" {% if quota.tier == "free" %}selected{% endif %}>Free</option>
-            <option value="pro" {% if quota.tier == "pro" %}selected{% endif %}>Pro</option>
-            <option value="enterprise" {% if quota.tier == "enterprise" %}selected{% endif %}>Enterprise</option>
-          </select>
+        <div class="grid">
+          <div class="field">
+            <label>Tier</label>
+            <select name="tier">
+              <option value="free" {% if sub.tier == "free" %}selected{% endif %}>Free</option>
+              <option value="free+" {% if sub.tier == "free+" %}selected{% endif %}>Free+</option>
+              <option value="pro" {% if sub.tier == "pro" %}selected{% endif %}>Pro</option>
+              <option value="enterprise" {% if sub.tier == "enterprise" %}selected{% endif %}>Enterprise</option>
+            </select>
+            <span class="hint">Auto-switches to Free+ if any limit differs from defaults</span>
+          </div>
         </div>
 
-        <div class="row">
-          <label>Max Event Participants</label>
-          <input type="number" name="max_event_participants" value="{{ quota.max_event_participants }}" min="1">
+        <div class="section-label">Weekly Limits (reset Monday 00:00 UTC)</div>
+        <div class="grid">
+          <div class="field">
+            <label>Capsules per Week</label>
+            <input type="number" name="max_capsules_per_week" value="{{ sub.max_capsules_per_week }}" min="1">
+            <span class="hint">Free default: 5</span>
+          </div>
+          <div class="field">
+            <label>Events per Week</label>
+            <input type="number" name="max_events_per_week" value="{{ sub.max_events_per_week }}" min="1">
+            <span class="hint">Free default: 1</span>
+          </div>
         </div>
 
-        <div class="row">
-          <label>Max Capsule Recipients</label>
-          <input type="number" name="max_capsule_recipients" value="{{ quota.max_capsule_recipients }}" min="1">
+        <div class="section-label">Per-Item Limits</div>
+        <div class="grid">
+          <div class="field">
+            <label>Max Event Participants</label>
+            <input type="number" name="max_event_participants" value="{{ sub.max_event_participants }}" min="1">
+            <span class="hint">Free default: 200</span>
+          </div>
+          <div class="field">
+            <label>Recipients per Capsule</label>
+            <input type="number" name="max_recipients_per_capsule" value="{{ sub.max_recipients_per_capsule }}" min="1">
+            <span class="hint">Free default: 5</span>
+          </div>
+          <div class="field">
+            <label>Media per Capsule</label>
+            <input type="number" name="max_media_per_capsule" value="{{ sub.max_media_per_capsule }}" min="1">
+            <span class="hint">Free default: 10</span>
+          </div>
+          <div class="field">
+            <label>Max Favorites</label>
+            <input type="number" name="max_favorites" value="{{ sub.max_favorites }}" min="1">
+            <span class="hint">Free default: 25</span>
+          </div>
         </div>
 
-        <button type="submit" class="save-btn">Save Changes</button>
+        <div class="section-label">Atlas</div>
+        <div class="grid">
+          <div class="field">
+            <label>Base Radius (miles)</label>
+            <input type="number" name="atlas_radius_miles" value="{{ sub.atlas_radius_miles }}" min="0.1" step="0.1">
+            <span class="hint">Free default: 1.0</span>
+          </div>
+          <div class="field">
+            <label>Weekly Growth (miles)</label>
+            <input type="number" name="atlas_radius_growth" value="{{ sub.atlas_radius_growth }}" min="0" step="0.1">
+            <span class="hint">Free default: 0.5</span>
+          </div>
+        </div>
+
+        <div class="section-label">Storage</div>
+        <div class="grid">
+          <div class="field">
+            <label>Max Storage (MB)</label>
+            <input type="number" name="max_storage_mb" value="{{ sub.max_storage_mb }}" min="1">
+            <span class="hint">Free default: 100</span>
+          </div>
+        </div>
+
+        <div class="section-label">Expiry & Notes</div>
+        <div class="expiry-row">
+          <div class="field">
+            <label>Expires At</label>
+            <input type="datetime-local" name="expires_at" value="{% if sub.expires_at %}{{ sub.expires_at|date:'Y-m-d\TH:i' }}{% endif %}">
+            <span class="hint">Leave empty for no expiry (permanent). When expired, reverts to free defaults.</span>
+          </div>
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#6B6560;padding-bottom:24px;">
+            <input type="checkbox" name="clear_expiry"> Clear expiry
+          </label>
+        </div>
+        <div class="grid" style="margin-top:14px;">
+          <div class="field field-full">
+            <label>Admin Notes</label>
+            <textarea name="notes" placeholder="Internal notes about this subscription change...">{{ sub.notes }}</textarea>
+          </div>
+        </div>
+
+        <div class="actions">
+          <button type="submit" class="save-btn">Save Subscription</button>
+        </div>
       </form>
     </div>
     {% endif %}

@@ -4,14 +4,14 @@ from django.shortcuts import render, redirect
 from django.http import JsonResponse
 from django.views.decorators.http import require_POST
 
-from users.models import EmailQueue, SupportTicket, UserQuota, FutrrUser
+from users.models import EmailQueue, SupportTicket, Subscription, FutrrUser
 
 
 # ── Sidebar nav helper ──────────────────────────
 ADMIN_NAV = [
     ("Mail Queue", "/api/su/mail-queue/"),
     ("Tickets", "/api/su/tickets/"),
-    ("Upgrade", "/api/su/upgrade/"),
+    ("Subscriptions", "/api/su/upgrade/"),
     ("Django Admin", "/admin/"),
 ]
 
@@ -106,34 +106,34 @@ def ticket_update_status(request, ticket_id):
     return redirect("/api/su/tickets/")
 
 
-# ── Upgrade (manage user quotas) ─────────────────
+# ── Subscriptions (manage user plans) ────────────
+
+def _Q(*args, **kwargs):
+    from django.db.models import Q
+    return Q(*args, **kwargs)
+
 
 @staff_member_required
 def upgrade_view(request):
     search = request.GET.get("q", "").strip()
     selected_user = None
-    quota = None
+    sub = None
 
     if search:
         selected_user = FutrrUser.objects.filter(
-            models_Q(email__iexact=search) | models_Q(username__iexact=search)
+            _Q(email__iexact=search) | _Q(username__iexact=search)
         ).first()
         if selected_user:
-            quota, _ = UserQuota.objects.get_or_create(user=selected_user)
+            sub, _ = Subscription.objects.get_or_create(user=selected_user)
 
     return render(request, "upgrade.html", {
         "search": search,
         "selected_user": selected_user,
-        "quota": quota,
+        "sub": sub,
         "user": request.user,
         "nav": ADMIN_NAV,
-        "active_page": "Upgrade",
+        "active_page": "Subscriptions",
     })
-
-
-def models_Q(*args, **kwargs):
-    from django.db.models import Q
-    return Q(*args, **kwargs)
 
 
 @staff_member_required
@@ -148,18 +148,62 @@ def upgrade_save(request):
     except FutrrUser.DoesNotExist:
         return redirect("/api/su/upgrade/")
 
-    quota, _ = UserQuota.objects.get_or_create(user=target)
+    sub, _ = Subscription.objects.get_or_create(user=target)
 
-    tier = request.POST.get("tier", quota.tier)
-    max_event = request.POST.get("max_event_participants")
-    max_recip = request.POST.get("max_capsule_recipients")
+    # Integer fields
+    int_fields = [
+        "max_capsules_per_week", "max_events_per_week",
+        "max_event_participants", "max_recipients_per_capsule",
+        "max_media_per_capsule", "max_storage_mb", "max_favorites",
+    ]
+    for field in int_fields:
+        val = request.POST.get(field)
+        if val and val.isdigit():
+            setattr(sub, field, int(val))
 
-    if tier:
-        quota.tier = tier
-    if max_event and max_event.isdigit():
-        quota.max_event_participants = int(max_event)
-    if max_recip and max_recip.isdigit():
-        quota.max_capsule_recipients = int(max_recip)
+    # Float fields
+    float_fields = ["atlas_radius_miles", "atlas_radius_growth"]
+    for field in float_fields:
+        val = request.POST.get(field)
+        if val:
+            try:
+                setattr(sub, field, float(val))
+            except ValueError:
+                pass
 
-    quota.save()
+    # Tier
+    tier = request.POST.get("tier", sub.tier)
+    if tier in dict(Subscription.TIER_CHOICES):
+        sub.tier = tier
+
+    # Expiry
+    from django.utils.dateparse import parse_datetime
+    expires_raw = request.POST.get("expires_at", "").strip()
+    if expires_raw:
+        parsed = parse_datetime(expires_raw)
+        if parsed:
+            from django.utils import timezone as tz
+            sub.expires_at = parsed if parsed.tzinfo else tz.make_aware(parsed)
+    elif "clear_expiry" in request.POST:
+        sub.expires_at = None
+
+    # Notes
+    notes = request.POST.get("notes", "").strip()
+    sub.notes = notes
+
+    # Auto-set tier to free+ if any value differs from free defaults
+    FREE_DEFAULTS = {
+        "max_capsules_per_week": 5, "max_events_per_week": 1,
+        "max_event_participants": 200, "max_recipients_per_capsule": 5,
+        "max_media_per_capsule": 10, "max_storage_mb": 100,
+        "max_favorites": 25, "atlas_radius_miles": 1.0,
+        "atlas_radius_growth": 0.5,
+    }
+    if sub.tier == "free":
+        for k, default_val in FREE_DEFAULTS.items():
+            if getattr(sub, k) != default_val:
+                sub.tier = "free+"
+                break
+
+    sub.save()
     return redirect(f"/api/su/upgrade/?q={target.email}")

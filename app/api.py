@@ -10,10 +10,46 @@ from rest_framework.views import APIView
 
 from .models import Capsule, CapsuleContent, CapsuleEncryptionKey, CapsuleFavorite, CapsulePin, CapsuleRecipient, Event, Notification
 from .s3 import generate_presigned_url, upload_encrypted_media, upload_file
-from users.models import FutrrUser, UserQuota
+from users.models import FutrrUser, Subscription
 
 api_logger = logging.getLogger("futrr.api")
 s3_logger = logging.getLogger("futrr.s3")
+
+
+# ── Subscription helper ──────────────────────────────────────────────────────
+
+_FREE_DEFAULTS = {
+    "max_capsules_per_week": 5,
+    "max_events_per_week": 1,
+    "max_event_participants": 200,
+    "max_recipients_per_capsule": 5,
+    "max_media_per_capsule": 10,
+    "atlas_radius_miles": 1.0,
+    "atlas_radius_growth": 0.5,
+    "max_storage_mb": 100,
+    "max_favorites": 25,
+}
+
+
+def _get_sub(user):
+    """Return the user's Subscription, creating free-tier defaults if absent.
+    If the subscription has expired, return an object with free-tier values."""
+    sub, _ = Subscription.objects.get_or_create(user=user)
+    if not sub.is_active:
+        # Expired — serve free defaults without persisting
+        for k, v in _FREE_DEFAULTS.items():
+            setattr(sub, k, v)
+        sub.tier = "free"
+    return sub
+
+
+def _week_start():
+    """Return Monday 00:00:00 UTC of the current week."""
+    from datetime import timedelta
+    now = timezone.now()
+    return (now - timedelta(days=now.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
 
 
 def _verify_passphrase(passphrase: str, enc_key) -> bool:
@@ -230,6 +266,24 @@ class CapsuleListCreateView(APIView):
                 {"error": "unlock_at is required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        # ── Quota: weekly capsule limit ──
+        sub = _get_sub(request.user)
+        capsules_this_week = Capsule.objects.filter(
+            created_by=request.user, created_at__gte=_week_start()
+        ).count()
+        if capsules_this_week >= sub.max_capsules_per_week:
+            return Response(
+                {
+                    "error": "Weekly capsule limit reached",
+                    "limit": sub.max_capsules_per_week,
+                    "current": capsules_this_week,
+                    "tier": sub.tier,
+                    "resets": "monday",
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         capsule = Capsule.objects.create(
             title=request.data.get("title", ""),
             description=request.data.get("description", ""),
@@ -329,15 +383,15 @@ class CapsuleRecipientView(APIView):
             )
 
         # ── Quota: capsule recipient limit ──
-        quota, _ = UserQuota.objects.get_or_create(user=request.user)
+        sub = _get_sub(request.user)
         current_count = CapsuleRecipient.objects.filter(capsule=capsule).count()
-        if current_count >= quota.max_capsule_recipients:
+        if current_count >= sub.max_recipients_per_capsule:
             return Response(
                 {
                     "error": "Recipient limit reached",
-                    "limit": quota.max_capsule_recipients,
+                    "limit": sub.max_recipients_per_capsule,
                     "current": current_count,
-                    "tier": quota.tier,
+                    "tier": sub.tier,
                 },
                 status=status.HTTP_403_FORBIDDEN,
             )
@@ -605,6 +659,23 @@ class EventListCreateView(APIView):
             if Event.objects.filter(slug=slug).exists():
                 return Response({"error": "This URL slug is already taken"}, status=status.HTTP_400_BAD_REQUEST)
 
+        # ── Quota: weekly event limit ──
+        sub = _get_sub(request.user)
+        events_this_week = Event.objects.filter(
+            created_by=request.user, created_at__gte=_week_start()
+        ).count()
+        if events_this_week >= sub.max_events_per_week:
+            return Response(
+                {
+                    "error": "Weekly event limit reached",
+                    "limit": sub.max_events_per_week,
+                    "current": events_this_week,
+                    "tier": sub.tier,
+                    "resets": "monday",
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         event = Event.objects.create(
             title=title,
             subtitle=request.data.get("subtitle", ""),
@@ -760,16 +831,16 @@ class EventJoinView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # ── Quota: event participant limit (checked against organiser's quota) ──
+        # ── Quota: event participant limit (checked against organiser's subscription) ──
         organiser = event.created_by
         if organiser:
-            quota, _ = UserQuota.objects.get_or_create(user=organiser)
+            sub = _get_sub(organiser)
             participant_count = Capsule.objects.filter(event=event).count()
-            if participant_count >= quota.max_event_participants:
+            if participant_count >= sub.max_event_participants:
                 return Response(
                     {
                         "error": "This event has reached its participant limit",
-                        "limit": quota.max_event_participants,
+                        "limit": sub.max_event_participants,
                     },
                     status=status.HTTP_403_FORBIDDEN,
                 )

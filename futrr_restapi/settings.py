@@ -180,8 +180,6 @@ AUTH_USER_MODEL = "users.FutrrUser"
 
 EMAIL_BACKEND = "django_ses.SESBackend"
 
-AWS_SES_REGION_NAME = "us-east-1"
-AWS_SES_REGION_ENDPOINT = "email.us-east-1.amazonaws.com"
 AWS_SES_AUTO_THROTTLE = None  # We handle rate limiting in our queue processor
 
 DEFAULT_FROM_EMAIL = "Futrr <no-reply@futrr.app>"
@@ -233,6 +231,8 @@ LOGGING = {
     },
 }
 
-# AWS
-AWS_REGION    = os.getenv("AWS_REGION", "us-east-1")
-AWS_S3_BUCKET = os.getenv("AWS_S3_BUCKET", "futrr-capsule-media")
+# AWS — credentials optional; omit in production (ECS task role handles auth)
+AWS_REGION         = os.getenv("AWS_REGION", "us-east-1")
+AWS_S3_BUCKET      = os.getenv("AWS_S3_BUCKET", "futrr-capsule-media")
+AWS_ACCESS_KEY_ID  = os.getenv("AWS_ACCESS_KEY_ID")      # local dev only
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")  # local dev only

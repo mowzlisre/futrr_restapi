@@ -47,6 +47,11 @@ class FutrrUser(AbstractUser):
     timezone = models.CharField(max_length=50, default="UTC")
     notification_email = models.BooleanField(default=True)
     notification_push = models.BooleanField(default=True)
+    notify_capsule_created = models.BooleanField(default=True)
+    notify_friend_request = models.BooleanField(default=True)
+    notify_capsule_unlocked = models.BooleanField(default=True)
+    notify_capsule_shared = models.BooleanField(default=True)
+    notify_nearby_capsule = models.BooleanField(default=True)
     is_private = models.BooleanField(default=False)
     is_email_verified = models.BooleanField(default=False)
     is_phone_verified = models.BooleanField(default=False)
@@ -258,3 +263,62 @@ class SupportTicket(models.Model):
 
     def __str__(self):
         return f"[{self.category}] {self.subject} — {self.user.username}"
+
+
+class Subscription(models.Model):
+    """
+    Single source of truth for every user's plan limits.
+    Free tier = default values.  Admin overrides → 'free+'.
+    Future paid plans override everything and set an expiry.
+    """
+
+    TIER_CHOICES = [
+        ("free", "Free"),
+        ("free+", "Free+"),
+        ("pro", "Pro"),
+        ("enterprise", "Enterprise"),
+    ]
+
+    user = models.OneToOneField(
+        FutrrUser, on_delete=models.CASCADE, related_name="subscription"
+    )
+    tier = models.CharField(max_length=20, choices=TIER_CHOICES, default="free")
+
+    # Weekly limits (reset every Monday 00:00 UTC)
+    max_capsules_per_week = models.PositiveIntegerField(default=5)
+    max_events_per_week = models.PositiveIntegerField(default=1)
+
+    # Per-item limits
+    max_event_participants = models.PositiveIntegerField(default=200)
+    max_recipients_per_capsule = models.PositiveIntegerField(default=5)
+    max_media_per_capsule = models.PositiveIntegerField(default=10)
+
+    # Atlas
+    atlas_radius_miles = models.FloatField(default=1.0)
+    atlas_radius_growth = models.FloatField(default=0.5)  # extra miles gained per week
+
+    # Storage (MB)
+    max_storage_mb = models.PositiveIntegerField(default=100)
+
+    # Favourites
+    max_favorites = models.PositiveIntegerField(default=25)
+
+    # Lifecycle
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    expires_at = models.DateTimeField(null=True, blank=True)  # null → never expires
+
+    notes = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        exp = f" (expires {self.expires_at:%Y-%m-%d})" if self.expires_at else ""
+        return f"{self.user.username} — {self.tier}{exp}"
+
+    @property
+    def is_active(self):
+        if self.expires_at is None:
+            return True
+        return timezone.now() < self.expires_at

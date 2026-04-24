@@ -9,7 +9,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from django.contrib.auth import authenticate
 from django.db import IntegrityError
 import requests
-from .models import FutrrUser, Follow, FollowRequest, PasswordResetToken, TwoFactorDevice, EmailOTP, UserQuota, SupportTicket
+from .models import FutrrUser, Follow, FollowRequest, PasswordResetToken, TwoFactorDevice, EmailOTP, SupportTicket, Subscription
 from django.db.models import Q
 from django.utils import timezone
 import secrets
@@ -838,6 +838,11 @@ class UserProfileView:
                 "timezone": user.timezone,
                 "notification_email": user.notification_email,
                 "notification_push": user.notification_push,
+                "notify_capsule_created": user.notify_capsule_created,
+                "notify_friend_request": user.notify_friend_request,
+                "notify_capsule_unlocked": user.notify_capsule_unlocked,
+                "notify_capsule_shared": user.notify_capsule_shared,
+                "notify_nearby_capsule": user.notify_nearby_capsule,
                 "is_private": user.is_private,
                 "is_email_verified": user.is_email_verified,
                 "is_phone_verified": user.is_phone_verified,
@@ -856,7 +861,11 @@ class UserProfileView:
     @permission_classes([IsAuthenticated])
     def update_me(request):
         user = request.user
-        allowed_fields = ["username", "bio", "timezone", "notification_email", "notification_push", "is_private", "avatar"]
+        allowed_fields = [
+            "username", "bio", "timezone", "notification_email", "notification_push",
+            "notify_capsule_created", "notify_friend_request", "notify_capsule_unlocked",
+            "notify_capsule_shared", "notify_nearby_capsule", "is_private", "avatar",
+        ]
         for field in allowed_fields:
             if field in request.data:
                 setattr(user, field, request.data[field])
@@ -1422,18 +1431,133 @@ class QuotaView:
     @api_view(["GET"])
     @permission_classes([IsAuthenticated])
     def get_quota(request):
-        quota, _ = UserQuota.objects.get_or_create(user=request.user)
-        from app.models import Capsule, CapsuleRecipient, Event
+        from app.models import Capsule, CapsuleContent, CapsuleFavorite, Event
+        from datetime import timedelta
+        import math
+
+        sub, _ = Subscription.objects.get_or_create(user=request.user)
+
+        # If subscription expired, overlay free-tier defaults (don't persist)
+        FREE_DEFAULTS = {
+            "max_capsules_per_week": 5, "max_events_per_week": 1,
+            "max_event_participants": 200, "max_recipients_per_capsule": 5,
+            "max_media_per_capsule": 10, "atlas_radius_miles": 1.0,
+            "atlas_radius_growth": 0.5, "max_storage_mb": 100, "max_favorites": 25,
+        }
+        if not sub.is_active:
+            for k, v in FREE_DEFAULTS.items():
+                setattr(sub, k, v)
+            sub.tier = "free"
+
+        # ── Week boundaries (Monday 00:00 UTC) ──
+        now = timezone.now()
+        days_since_monday = now.weekday()  # 0=Mon
+        week_start = (now - timedelta(days=days_since_monday)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        week_end = week_start + timedelta(days=7)
+
+        # ── Weekly usage ──
+        capsules_this_week = Capsule.objects.filter(
+            created_by=request.user, created_at__gte=week_start
+        ).count()
+        events_this_week = Event.objects.filter(
+            created_by=request.user, created_at__gte=week_start
+        ).count()
+
+        # ── Storage used (MB) ──
+        from django.db.models import Sum
+        storage_bytes = (
+            CapsuleContent.objects.filter(added_by=request.user)
+            .aggregate(total=Sum("file_size"))["total"]
+            or 0
+        )
+        storage_used_mb = round(storage_bytes / (1024 * 1024), 1)
+
+        # ── Favorites used ──
+        favorites_used = CapsuleFavorite.objects.filter(user=request.user).count()
+
+        # ── Atlas radius (grows each week since account creation) ──
+        weeks_active = max(
+            1, math.floor((now - request.user.created_at).days / 7)
+        )
+        current_atlas_radius = sub.atlas_radius_miles + (
+            sub.atlas_radius_growth * (weeks_active - 1)
+        )
+
         return Response({
-            "tier": quota.tier,
-            "limits": {
-                "max_event_participants": quota.max_event_participants,
-                "max_capsule_recipients": quota.max_capsule_recipients,
-            },
-            "usage": {
-                "events_created": Event.objects.filter(created_by=request.user).count(),
-                "capsules_created": Capsule.objects.filter(created_by=request.user).count(),
-            },
+            "tier": sub.tier,
+            "expires_at": sub.expires_at.isoformat() if sub.expires_at else None,
+            "week_resets_at": week_end.isoformat(),
+            "quotas": [
+                {
+                    "key": "capsules_per_week",
+                    "label": "Capsules",
+                    "description": "Time capsules you can create per week",
+                    "used": capsules_this_week,
+                    "limit": sub.max_capsules_per_week,
+                    "resets": "weekly",
+                },
+                {
+                    "key": "events_per_week",
+                    "label": "Events",
+                    "description": "Events you can create per week",
+                    "used": events_this_week,
+                    "limit": sub.max_events_per_week,
+                    "resets": "weekly",
+                },
+                {
+                    "key": "event_participants",
+                    "label": "Event Participants",
+                    "description": "Maximum attendees per event",
+                    "used": None,
+                    "limit": sub.max_event_participants,
+                    "resets": None,
+                },
+                {
+                    "key": "recipients_per_capsule",
+                    "label": "Capsule Recipients",
+                    "description": "People you can send each capsule to",
+                    "used": None,
+                    "limit": sub.max_recipients_per_capsule,
+                    "resets": None,
+                },
+                {
+                    "key": "atlas_radius",
+                    "label": "Atlas Radius",
+                    "description": f"Discover capsules within {current_atlas_radius:.1f} miles",
+                    "used": round(current_atlas_radius, 1),
+                    "limit": None,
+                    "resets": None,
+                    "unit": "miles",
+                    "growth": sub.atlas_radius_growth,
+                },
+                {
+                    "key": "media_per_capsule",
+                    "label": "Media per Capsule",
+                    "description": "Photos, videos, or voice notes per capsule",
+                    "used": None,
+                    "limit": sub.max_media_per_capsule,
+                    "resets": None,
+                },
+                {
+                    "key": "storage",
+                    "label": "Storage",
+                    "description": "Total media storage across all capsules",
+                    "used": storage_used_mb,
+                    "limit": sub.max_storage_mb,
+                    "resets": None,
+                    "unit": "MB",
+                },
+                {
+                    "key": "favorites",
+                    "label": "Favorites",
+                    "description": "Capsules you can bookmark",
+                    "used": favorites_used,
+                    "limit": sub.max_favorites,
+                    "resets": None,
+                },
+            ],
         })
 
 
