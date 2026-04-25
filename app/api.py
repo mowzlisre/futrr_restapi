@@ -8,7 +8,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import Capsule, CapsuleContent, CapsuleEncryptionKey, CapsuleFavorite, CapsulePin, CapsuleRecipient, Event, Notification
+from .models import Capsule, CapsuleContent, CapsuleEncryptionKey, CapsuleFavorite, CapsuleRecipient, Event, Notification
 from .s3 import generate_presigned_url, upload_encrypted_media, upload_file
 from users.models import FutrrUser, Subscription
 
@@ -77,7 +77,7 @@ def _presign_creator_avatar(avatar_value):
         return generate_presigned_url(avatar_value, expiry_seconds=3600)
     return avatar_value
 
-def _serialize_capsule(capsule, include_content=False, user=None, favorited_ids=None, pinned_ids=None):
+def _serialize_capsule(capsule, include_content=False, user=None, favorited_ids=None):
     # Determine encryption type from the linked key record (if any).
     # "self" means UMK (passphrase-protected); "auto" means SMK or no key.
     try:
@@ -98,17 +98,8 @@ def _serialize_capsule(capsule, include_content=False, user=None, favorited_ids=
     else:
         is_favorited = False
 
-    # is_pinned: use pre-fetched set when available, otherwise hit the DB once.
-    if pinned_ids is not None:
-        is_pinned = capsule.id in pinned_ids
-    elif user is not None:
-        is_pinned = CapsulePin.objects.filter(user=user, capsule=capsule).exists()
-    else:
-        is_pinned = False
-
     # Aggregate counts
     favorite_count = capsule.favorited_by.count()
-    pin_count = capsule.pinned_by.count()
 
     # Lightweight content-type summary (distinct types present in the capsule)
     content_types = list(
@@ -126,10 +117,8 @@ def _serialize_capsule(capsule, include_content=False, user=None, favorited_ids=
         "encryption_type": encryption_type,
         "is_public": capsule.is_public,
         "is_favorited": is_favorited,
-        "is_pinned": is_pinned,
         "listed_in_atlas": capsule.listed_in_atlas,
         "favorite_count": favorite_count,
-        "pin_count": pin_count,
         "share_token": str(capsule.share_token),
         "event": str(capsule.event_id) if capsule.event_id else None,
         "sealed_at": capsule.sealed_at,
@@ -1344,11 +1333,11 @@ class NotificationListView(APIView):
 
 class NotificationReadView(APIView):
     """
-    PATCH /api/notifications/:id/read/  — mark a notification as read
+    PATCH/POST /api/notifications/:id/read/  — mark a notification as read
     """
     permission_classes = [IsAuthenticated]
 
-    def patch(self, request, notif_id):
+    def _mark_read(self, request, notif_id):
         try:
             notif = Notification.objects.get(id=notif_id, user=request.user)
         except Notification.DoesNotExist:
@@ -1357,47 +1346,16 @@ class NotificationReadView(APIView):
         notif.save(update_fields=["is_read"])
         return Response({"message": "Marked as read"})
 
+    def patch(self, request, notif_id):
+        return self._mark_read(request, notif_id)
+
+    def post(self, request, notif_id):
+        return self._mark_read(request, notif_id)
+
 
 # ---------------------------------------------------------------------------
 # Capsule Pin
 # ---------------------------------------------------------------------------
-
-class CapsulePinView(APIView):
-    """
-    POST /api/capsules/:id/pin/
-
-    Toggle pin on a public capsule for the requesting user's profile.
-    Only public capsules can be pinned. Returns the new state.
-    """
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request, capsule_id):
-        try:
-            capsule = Capsule.objects.get(id=capsule_id)
-        except Capsule.DoesNotExist:
-            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
-
-        if not capsule.is_accessible:
-            return Response(
-                {"error": "This capsule is broken and inaccessible"},
-                status=status.HTTP_410_GONE,
-            )
-
-        if not capsule.is_public:
-            return Response(
-                {"error": "Only public capsules can be pinned"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        pin, created = CapsulePin.objects.get_or_create(
-            user=request.user, capsule=capsule
-        )
-        if not created:
-            pin.delete()
-            return Response({"pinned": False})
-
-        return Response({"pinned": True}, status=status.HTTP_201_CREATED)
-
 
 # ---------------------------------------------------------------------------
 # Capsule Visibility
@@ -1447,9 +1405,8 @@ class CapsuleVisibilityView(APIView):
             capsule.is_public = new_public
             updated.append("is_public") if "is_public" not in updated else None
 
-            # Public → Private: auto-unpin from all profiles, remove from atlas
+            # Public → Private: remove from atlas
             if not new_public:
-                CapsulePin.objects.filter(capsule=capsule).delete()
                 capsule.listed_in_atlas = False
                 updated.append("listed_in_atlas")
 
@@ -1483,44 +1440,3 @@ class CapsuleVisibilityView(APIView):
         })
 
 
-# ---------------------------------------------------------------------------
-# Pinned Capsules List
-# ---------------------------------------------------------------------------
-
-class PinnedCapsulesListView(APIView):
-    """
-    GET /api/capsules/pinned/           — list capsules pinned by the requesting user
-    GET /api/capsules/pinned/:user_id/  — list capsules pinned by a specific user
-    """
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request, user_id=None):
-        target_user = request.user
-        if user_id:
-            try:
-                target_user = FutrrUser.objects.get(id=user_id)
-            except FutrrUser.DoesNotExist:
-                return Response({"error": "User not found"}, status=status.HTTP_404_NOT_FOUND)
-
-        capsules = list(
-            Capsule.objects.filter(
-                pinned_by__user=target_user, is_public=True,
-            ).exclude(status=Capsule.Status.BROKEN)
-            .select_related("created_by", "encryption_key")
-            .prefetch_related("capsule_recipients", "contents")
-            .order_by("-pinned_by__created_at")
-        )
-        fav_ids = set(
-            CapsuleFavorite.objects.filter(
-                user=request.user, capsule_id__in=[c.id for c in capsules]
-            ).values_list("capsule_id", flat=True)
-        )
-        pin_ids = set(
-            CapsulePin.objects.filter(
-                user=request.user, capsule_id__in=[c.id for c in capsules]
-            ).values_list("capsule_id", flat=True)
-        )
-        return Response([
-            _serialize_capsule(c, user=request.user, favorited_ids=fav_ids, pinned_ids=pin_ids)
-            for c in capsules
-        ])

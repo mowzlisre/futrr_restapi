@@ -399,7 +399,7 @@ class PasswordResetView:
     @permission_classes([AllowAny])
     def forget_password(request):
         """Look up user by email or username, send a 6-digit OTP."""
-        identifier = request.data.get("identifier", "").strip().lower()
+        identifier = (request.data.get("identifier") or request.data.get("email") or "").strip().lower()
         if not identifier:
             return Response({"error": "Email or username is required"}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -626,7 +626,7 @@ class TwoFactorView:
 
             try:
                 device = TwoFactorDevice.objects.get(id=device_id, user=request.user)
-            except TwoFactorDevice.DoesNotExist:
+            except (TwoFactorDevice.DoesNotExist, ValueError, TypeError):
                 return Response(
                     {"error": "Device not found"},
                     status=status.HTTP_404_NOT_FOUND
@@ -671,7 +671,7 @@ class TwoFactorView:
 
             try:
                 device = TwoFactorDevice.objects.get(id=device_id, user=request.user)
-            except TwoFactorDevice.DoesNotExist:
+            except (TwoFactorDevice.DoesNotExist, ValueError, TypeError):
                 return Response(
                     {"error": "Device not found"},
                     status=status.HTTP_404_NOT_FOUND
@@ -1050,7 +1050,7 @@ class FollowView:
                 from app.models import Notification
                 Notification.objects.create(
                     user=target,
-                    notif_type="recipient_added",
+                    notif_type="follow_request",
                     title=f"@{request.user.username} requested to follow you",
                     body="",
                 )
@@ -1068,7 +1068,7 @@ class FollowView:
         return Response({"following": True, "pending": False}, status=status.HTTP_200_OK)
 
     @staticmethod
-    @api_view(["DELETE"])
+    @api_view(["DELETE", "POST"])
     @permission_classes([IsAuthenticated])
     def unfollow(request, user_id):
         Follow.objects.filter(follower=request.user, following_id=user_id).delete()
@@ -1332,7 +1332,7 @@ class PreboardingView:
     """Complete profile preboarding (steps 4-6 of onboarding)."""
 
     @staticmethod
-    @api_view(["PATCH"])
+    @api_view(["PATCH", "POST"])
     @permission_classes([IsAuthenticated])
     def complete(request):
         from datetime import date as date_type

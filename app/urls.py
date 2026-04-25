@@ -10,9 +10,7 @@ from .api import (
     CapsuleMapView,
     CapsuleFavoriteView,
     CapsuleFavoritesListView,
-    CapsulePinView,
     CapsuleVisibilityView,
-    PinnedCapsulesListView,
     EventListCreateView,
     EventDetailView,
     EventJoinView,
@@ -38,10 +36,7 @@ urlpatterns = [
     path("capsules/<uuid:capsule_id>/unlock/", CapsuleUnlockView.as_view(), name="capsule-unlock"),
     path("capsules/<uuid:capsule_id>/contents/", CapsuleContentView.as_view(), name="capsule-content"),
     path("capsules/<uuid:capsule_id>/favorite/", CapsuleFavoriteView.as_view(), name="capsule-favorite"),
-    path("capsules/<uuid:capsule_id>/pin/", CapsulePinView.as_view(), name="capsule-pin"),
     path("capsules/<uuid:capsule_id>/visibility/", CapsuleVisibilityView.as_view(), name="capsule-visibility"),
-    path("capsules/pinned/", PinnedCapsulesListView.as_view(), name="capsule-pinned-list"),
-    path("capsules/pinned/<uuid:user_id>/", PinnedCapsulesListView.as_view(), name="capsule-pinned-user"),
 
     # Discover feed
     path("discover/", DiscoverView.as_view(), name="discover"),

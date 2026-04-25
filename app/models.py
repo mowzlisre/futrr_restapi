@@ -244,6 +244,7 @@ class Notification(models.Model):
     class NotifType(models.TextChoices):
         CAPSULE_UNLOCKED = "capsule_unlocked", "Capsule Unlocked"
         RECIPIENT_ADDED = "recipient_added", "Added as Recipient"
+        FOLLOW_REQUEST = "follow_request", "Follow Request"
         EVENT_JOINED = "event_joined", "Someone Joined Your Event"
         EVENT_UNLOCKED = "event_unlocked", "Event Capsules Unlocked"
         SYSTEM = "system", "System"
