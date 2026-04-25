@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - "futrr_restapi/**"
+      - "**"
       - ".github/workflows/deploy-backend.yml"
 
 env:
@@ -40,7 +40,7 @@ jobs:
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
-          context: ./futrr_restapi
+          context: .
           platforms: linux/amd64
           push: true
           tags: |
