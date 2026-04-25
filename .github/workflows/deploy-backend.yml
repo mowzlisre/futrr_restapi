@@ -1,0 +1,105 @@
+name: Deploy Backend
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "futrr_restapi/**"
+      - ".github/workflows/deploy-backend.yml"
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY: 961776041029.dkr.ecr.us-east-1.amazonaws.com
+  ECR_REPOSITORY: futrr-api
+  ECS_CLUSTER: futrr-cluster
+  ECS_SERVICE: futrr-api
+  CONTAINER_NAME: futrr-api
+
+jobs:
+  deploy:
+    name: Build & Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_DEPLOY_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_DEPLOY_SECRET }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./futrr_restapi
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run database migrations
+        run: |
+          # Launch a one-off task using the freshly pushed image to run migrations
+          TASK_DEF=$(aws ecs describe-services \
+            --cluster $ECS_CLUSTER --services $ECS_SERVICE \
+            --query 'services[0].taskDefinition' --output text)
+
+          TASK_ARN=$(aws ecs run-task \
+            --cluster $ECS_CLUSTER \
+            --task-definition "$TASK_DEF" \
+            --launch-type FARGATE \
+            --network-configuration 'awsvpcConfiguration={
+              subnets=["subnet-068c37524a67018d8","subnet-01993bda5a1c1a763"],
+              securityGroups=["sg-02bebee6c47880bbb"],
+              assignPublicIp="ENABLED"
+            }' \
+            --overrides '{
+              "containerOverrides": [{
+                "name": "${{ env.CONTAINER_NAME }}",
+                "command": ["python", "manage.py", "migrate", "--noinput"]
+              }]
+            }' \
+            --query 'tasks[0].taskArn' --output text)
+
+          echo "Migration task: $TASK_ARN"
+
+          # Wait for task to finish (timeout ~10 min)
+          aws ecs wait tasks-stopped \
+            --cluster $ECS_CLUSTER --tasks "$TASK_ARN"
+
+          EXIT_CODE=$(aws ecs describe-tasks \
+            --cluster $ECS_CLUSTER --tasks "$TASK_ARN" \
+            --query "tasks[0].containers[?name=='${{ env.CONTAINER_NAME }}'].exitCode | [0]" \
+            --output text)
+
+          echo "Migration exit code: $EXIT_CODE"
+          [ "$EXIT_CODE" = "0" ] || { echo "Migration failed"; exit 1; }
+
+      - name: Force new ECS deployment
+        run: |
+          aws ecs update-service \
+            --cluster $ECS_CLUSTER \
+            --service $ECS_SERVICE \
+            --force-new-deployment \
+            --query 'service.deployments[0].{id:id,status:status}' \
+            --output json
+
+      - name: Wait for service to stabilize
+        run: |
+          echo "Waiting for deployment to stabilize..."
+          aws ecs wait services-stable \
+            --cluster $ECS_CLUSTER \
+            --services $ECS_SERVICE
+          echo "Deployment complete ✓"
