@@ -13,6 +13,7 @@ Run as: python manage.py process_email_queue
 import logging
 import time
 from itertools import cycle
+from datetime import timedelta
 
 from django.core.management.base import BaseCommand
 from django.utils import timezone
@@ -22,9 +23,10 @@ from users.emails.queue import send_queued_email
 
 logger = logging.getLogger("futrr.email")
 
-DAILY_THRESHOLD = 40_000   # after this, only high-priority emails
-RATE_LIMIT = 12            # emails/sec (headroom for inline sends)
-CYCLE_SLEEP = 5            # seconds between queue cycles
+DAILY_THRESHOLD  = 40_000   # after this, only high-priority emails
+RATE_LIMIT       = 12       # emails/sec (headroom for inline sends)
+CYCLE_SLEEP      = 5        # seconds between queue cycles
+CLEANUP_INTERVAL = 720      # run notification cleanup every N cycles (~1 hour)
 
 
 class Command(BaseCommand):
@@ -33,13 +35,25 @@ class Command(BaseCommand):
     def handle(self, **options):
         self.stdout.write("Email queue processor started")
         logger.info("queue_processor_started", extra={"action": "queue_processor_started"})
+        cycle_count = 0
 
         while True:
             try:
                 self._process_cycle()
+                cycle_count += 1
+                # Clean up old notifications once per hour
+                if cycle_count % CLEANUP_INTERVAL == 0:
+                    self._cleanup_notifications()
             except Exception:
                 logger.error("queue_cycle_error", extra={"action": "queue_cycle_error"}, exc_info=True)
             time.sleep(CYCLE_SLEEP)
+
+    def _cleanup_notifications(self):
+        from app.models import Notification
+        cutoff = timezone.now() - timedelta(days=7)
+        deleted, _ = Notification.objects.filter(created_at__lt=cutoff).delete()
+        if deleted:
+            logger.info("notifications_cleaned", extra={"action": "notifications_cleaned", "deleted": deleted})
 
     def _process_cycle(self):
         today = timezone.now().date()

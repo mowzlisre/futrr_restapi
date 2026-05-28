@@ -1285,12 +1285,32 @@ class GlobalFeedView(APIView):
 # ---------------------------------------------------------------------------
 
 def _serialize_notification(notif):
+    import re
+    from users.models import FutrrUser
+
+    # Extract the first @username from the title to identify the sender
+    from_user_data = None
+    match = re.search(r"@([\w.]+)", notif.title)
+    if match:
+        username = match.group(1)
+        try:
+            sender = FutrrUser.objects.get(username=username)
+            from users.api import _presign_avatar
+            from_user_data = {
+                "id": str(sender.id),
+                "username": sender.username,
+                "avatar": _presign_avatar(sender.avatar),
+            }
+        except FutrrUser.DoesNotExist:
+            pass
+
     return {
         "id": str(notif.id),
         "type": notif.notif_type,
         "title": notif.title,
         "body": notif.body,
         "is_read": notif.is_read,
+        "from_user": from_user_data,
         "related_capsule": str(notif.related_capsule_id) if notif.related_capsule_id else None,
         "related_capsule_title": notif.related_capsule.title if notif.related_capsule_id and hasattr(notif, "related_capsule") and notif.related_capsule else None,
         "related_event": str(notif.related_event_id) if notif.related_event_id else None,

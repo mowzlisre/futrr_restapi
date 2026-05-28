@@ -27,7 +27,7 @@ class Event(models.Model):
         ("travel", "Travel"),
         ("festival", "Festival"),
         ("music", "Music"),
-        ("memorial", "Memorial"),
+        ("milestone", "Milestone"),
         ("reunion", "Reunion"),
         ("other", "Other"),
     ]
