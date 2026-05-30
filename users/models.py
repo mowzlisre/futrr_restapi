@@ -98,50 +98,6 @@ class PasswordResetToken(models.Model):
         super().save(*args, **kwargs)
 
 
-class Follow(models.Model):
-    """follower → following relationship (Twitter-style, no mutual approval)."""
-    follower = models.ForeignKey(
-        FutrrUser, on_delete=models.CASCADE, related_name="following"
-    )
-    following = models.ForeignKey(
-        FutrrUser, on_delete=models.CASCADE, related_name="followers"
-    )
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        unique_together = [["follower", "following"]]
-
-    def __str__(self):
-        return f"{self.follower} → {self.following}"
-
-
-class FollowRequest(models.Model):
-    """Pending follow request when target account is private."""
-    STATUS_PENDING = "pending"
-    STATUS_ACCEPTED = "accepted"
-    STATUS_REJECTED = "rejected"
-    STATUS_CHOICES = [
-        (STATUS_PENDING, "Pending"),
-        (STATUS_ACCEPTED, "Accepted"),
-        (STATUS_REJECTED, "Rejected"),
-    ]
-
-    from_user = models.ForeignKey(
-        FutrrUser, on_delete=models.CASCADE, related_name="sent_follow_requests"
-    )
-    to_user = models.ForeignKey(
-        FutrrUser, on_delete=models.CASCADE, related_name="received_follow_requests"
-    )
-    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default=STATUS_PENDING)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        unique_together = [["from_user", "to_user"]]
-
-    def __str__(self):
-        return f"{self.from_user} → {self.to_user} ({self.status})"
-
-
 class TwoFactorDevice(models.Model):
     """2FA devices for users"""
     DEVICE_TYPES = [

@@ -3,7 +3,6 @@ from .api import (
     SignUpView, LoginView, LogoutView, OAuthView,
     PasswordResetView, TwoFactorView, ChangePasswordView,
     UserProfileView, DeleteAccountView,
-    UserSearchView, PublicUserProfileView, FollowView, FollowRequestView,
     AvatarUploadView, EmailOTPView, RegistrationView, PreboardingView,
     QuotaView, SupportView,
 )
@@ -42,17 +41,6 @@ urlpatterns = [
     path('me/', UserProfileView.get_me, name='user-me-get'),
     path('me/update/', UserProfileView.update_me, name='user-me-update'),
     path('me/avatar/', AvatarUploadView.upload, name='avatar-upload'),
-    path('me/followers/', FollowView.followers, name='my-followers'),
-    path('me/following/', FollowView.following, name='my-following'),
-
-    # Social
-    path('search/', UserSearchView.search, name='user-search'),
-    path('me/follow-requests/', FollowRequestView.list_requests, name='follow-requests-list'),
-    path('follow-requests/<int:request_id>/accept/', FollowRequestView.accept_request, name='follow-request-accept'),
-    path('follow-requests/<int:request_id>/reject/', FollowRequestView.reject_request, name='follow-request-reject'),
-    path('<uuid:user_id>/', PublicUserProfileView.get_user, name='user-profile'),
-    path('<uuid:user_id>/follow/', FollowView.follow, name='user-follow'),
-    path('<uuid:user_id>/unfollow/', FollowView.unfollow, name='user-unfollow'),
 
     # Quota & Support
     path('me/quota/', QuotaView.get_quota, name='user-quota'),
