@@ -10,9 +10,19 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RenameIndex(
-            model_name='emailqueue',
-            new_name='users_email_status_8f6ac0_idx',
-            old_name='users_email_status_d2e3f4_idx',
+        migrations.RunSQL(
+            sql="""
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM pg_indexes
+                    WHERE indexname = 'users_email_status_d2e3f4_idx'
+                ) THEN
+                    ALTER INDEX users_email_status_d2e3f4_idx
+                    RENAME TO users_email_status_8f6ac0_idx;
+                END IF;
+            END $$;
+            """,
+            reverse_sql=migrations.RunSQL.noop,
         ),
     ]
