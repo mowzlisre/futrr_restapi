@@ -9,7 +9,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import Capsule, CapsuleContent, CapsuleEncryptionKey, CapsuleFavorite, CapsuleRecipient, Event, Notification
-from .s3 import generate_presigned_url, upload_encrypted_media, upload_file
+from .s3 import generate_presigned_url, upload_encrypted_media, upload_file, delete_files
 from users.models import FutrrUser, Subscription
 
 api_logger = logging.getLogger("futrr.api")
@@ -348,6 +348,41 @@ class CapsuleDetailView(APIView):
         capsule.delete()
         api_logger.info("capsule_deleted", extra={"action": "capsule_deleted", "user_id": str(request.user.id), "category": "capsules"})
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class CapsuleBreakView(APIView):
+    """
+    POST /api/capsules/:id/break/
+
+    Permanently destroys a capsule's contents. Owner only.
+    - Deletes all media files from S3
+    - Deletes all CapsuleContent records
+    - Sets status to BROKEN (irreversible)
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, capsule_id):
+        try:
+            capsule = Capsule.objects.prefetch_related("contents").get(id=capsule_id)
+        except Capsule.DoesNotExist:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        if capsule.created_by_id != request.user.id:
+            return Response({"error": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+
+        if capsule.status == Capsule.Status.BROKEN:
+            return Response({"broken": True}, status=status.HTTP_200_OK)
+
+        s3_keys = [c.file for c in capsule.contents.all() if c.file]
+        if s3_keys:
+            delete_files(s3_keys)
+
+        capsule.contents.all().delete()
+        capsule.status = Capsule.Status.BROKEN
+        capsule.save(update_fields=["status"])
+
+        api_logger.info("capsule_broken", extra={"action": "capsule_broken", "user_id": str(request.user.id), "category": "capsules"})
+        return Response({"broken": True}, status=status.HTTP_200_OK)
 
 
 class CapsuleRecipientView(APIView):

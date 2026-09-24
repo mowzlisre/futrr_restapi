@@ -2,6 +2,7 @@ from django.urls import path
 from .api import (
     CapsuleListCreateView,
     CapsuleDetailView,
+    CapsuleBreakView,
     CapsuleRecipientView,
     CapsuleInvitationView,
     CapsuleJoinView,
@@ -31,6 +32,7 @@ urlpatterns = [
     path("capsules/favorites/", CapsuleFavoritesListView.as_view(), name="capsule-favorites-list"),
     path("capsules/join/<uuid:share_token>/", CapsuleJoinView.as_view(), name="capsule-join"),
     path("capsules/<uuid:capsule_id>/", CapsuleDetailView.as_view(), name="capsule-detail"),
+    path("capsules/<uuid:capsule_id>/break/", CapsuleBreakView.as_view(), name="capsule-break"),
     path("capsules/<uuid:capsule_id>/recipients/", CapsuleRecipientView.as_view(), name="capsule-add-recipient"),
     path("capsules/<uuid:capsule_id>/invitation/", CapsuleInvitationView.as_view(), name="capsule-invitation"),
     path("capsules/<uuid:capsule_id>/unlock/", CapsuleUnlockView.as_view(), name="capsule-unlock"),
